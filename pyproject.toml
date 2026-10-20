@@ -1,0 +1,31 @@
+[project]
+name = "projet-master"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "gabriel", email = "gabrieldurand2002@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "brkraw>=0.5.7",
+    "brukerapi>=0.4.6",
+    "matplotlib>=3.11.2",
+    "monai>=1.6.1",
+    "networks>=0.3.7",
+    "numpy>=2.4.6",
+    "opencv-python>=5.0.0.93",
+    "pytorch-lightning>=2.6.6",
+    "roifile>=2026.2.10",
+    "scipy>=1.17.1",
+    "segmentation-models-pytorch>=0.5.0",
+    "timm>=1.0.30",
+    "torch>=2.14.1",
+]
+
+[project.scripts]
+projet-master = "projet_master:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
