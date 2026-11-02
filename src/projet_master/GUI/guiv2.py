@@ -388,7 +388,7 @@ class MRIImageView(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setMinimumSize(300, 300)
         self.setToolTip(
-            "Mouse wheel: zoom | Left-click and drag: pan | Double-click: fit image"
+            "Mouse wheel: zoom | Left-click and drag: pan | Double-click: Reset zoom"
         )
 
     def set_mri_pixmap(self, pixmap: QPixmap):
@@ -514,9 +514,16 @@ class MainWindow(QWidget):
         self.browse_button.clicked.connect(self.browse_folder)
         layout.addWidget(self.browse_button)
 
-        self.model_directory_button = QPushButton("Choisir le dossier des modèles")
+        self.model_directory_button = QPushButton("Spécifier le dossier des modèles")
         self.model_directory_button.clicked.connect(self.choose_model_directory)
         layout.addWidget(self.model_directory_button)
+
+        self.model_warning_label = QLabel()
+        self.model_warning_label.setWordWrap(True)
+        self.model_warning_label.setStyleSheet(
+            "color: #9c0006; background-color: #ffc7ce; padding: 6px;"
+        )
+        layout.addWidget(self.model_warning_label)
 
         self.model_directory_label = QLabel()
         self.model_directory_label.setWordWrap(True)
@@ -554,10 +561,18 @@ class MainWindow(QWidget):
     def _refresh_model_directory_label(self):
         model_directory = saved_model_directory()
         if model_directory is None:
+            self.model_warning_label.setText(
+                "⚠ Aucun dossier de modèle n'est configuré. "
+                "Spécifiez un dossier contenant au moins un fichier .ckpt "
+                "avant d'ouvrir un dataset."
+            )
+            self.model_warning_label.show()
             self.model_directory_label.setText(
                 "Dossier des modèles : non configuré"
             )
         else:
+            self.model_warning_label.clear()
+            self.model_warning_label.hide()
             self.model_directory_label.setText(
                 f"Dossier des modèles : {model_directory}"
             )
@@ -787,7 +802,7 @@ class MRIViewer(QWidget):
         navigation_layout.addWidget(self.next_button)
         
 
-        self.fit_button = QPushButton("Fit image")
+        self.fit_button = QPushButton("Reset zoom")
         self.fit_button.setToolTip("Fit the entire MRI slice in the viewer")
         self.fit_button.clicked.connect(self.image_fit)
         navigation_layout.addWidget(self.fit_button)
