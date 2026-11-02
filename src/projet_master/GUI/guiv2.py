@@ -1,6 +1,7 @@
 
 import os
 import pathlib
+import sys
 import cv2
 import numpy as np
 import brkraw
@@ -203,24 +204,16 @@ class SlicePredictor:
             if torch.cuda.is_available()
             else "cpu"
         )
-        import importlib.util
-
-        model_path = PROJECT_ROOT / "segment_stroke_3DUnet.py"
-        module_spec = importlib.util.spec_from_file_location(
-            "projet_master_3d_unet",
-            model_path,
+        bundled_root = getattr(sys, "_MEIPASS", None)
+        package_root = (
+            pathlib.Path(bundled_root)
+            if bundled_root
+            else pathlib.Path(__file__).resolve().parents[2]
         )
-        if module_spec is None or module_spec.loader is None:
-            raise ImportError(f"Impossible de charger le modèle {model_path}.")
-        model_module = importlib.util.module_from_spec(module_spec)
-        module_spec.loader.exec_module(model_module)
-        AVCSegModel = model_module.AVCSegModel
+        sys.path.insert(0, str(package_root))
+        from projet_master.model_inference import load_inference_model
 
-        self.model = AVCSegModel.load_from_checkpoint(
-            str(checkpoint),
-            map_location=self.device,
-        ).to(self.device)
-        self.model.eval()
+        self.model = load_inference_model(checkpoint, self.device)
         self.checkpoint = checkpoint
 
     def predict(self, model_volume: np.ndarray, checkpoint: pathlib.Path) -> np.ndarray:
@@ -502,7 +495,7 @@ class MainWindow(QWidget):
         
 
         self.setWindowTitle("MRI Dataset Browser")
-        self.resize(700, 700)
+        self.resize(700, 500)
         self.setAcceptDrops(True)
         # Icone du logo dans la barre de titre et sur la barre des tâches
         self.icon = QIcon(str(LOGO_PATH))
