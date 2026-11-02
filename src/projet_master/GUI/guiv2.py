@@ -7,7 +7,7 @@ import brkraw
 from roifile import ImagejRoi, ROI_TYPE, roiwrite
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QIcon, QImage, QPixmap, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
     QWidget,
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
 MODEL_DIRECTORY_FILE = PROJECT_ROOT / "model_directory.txt"
 PREDICTION_THRESHOLD = 0.5
-
+LOGO_PATH = pathlib.Path(__file__).resolve().parent / "logo.png"
 
 def find_dataset_files(dir_path: str) -> list[str]:
     """Recherche les fichiers .PvDatasets dans un dossier."""
@@ -499,10 +499,14 @@ class MainWindow(QWidget):
 
     def __init__(self):
         super().__init__()
+        
 
         self.setWindowTitle("MRI Dataset Browser")
         self.resize(650, 500)
         self.setAcceptDrops(True)
+        # Icone du logo dans la barre de titre et sur la barre des tâches
+        self.icon = QIcon(str(LOGO_PATH))
+        self.setWindowIcon(self.icon)
 
         # Conserve les références vers toutes les fenêtres de visualisation ouvertes.
         self.viewers = []
@@ -510,7 +514,7 @@ class MainWindow(QWidget):
 
         layout = QVBoxLayout(self)
 
-        self.browse_button = QPushButton("Browse folder")
+        self.browse_button = QPushButton("Parcourir un dossier de datasets")
         self.browse_button.clicked.connect(self.browse_folder)
         layout.addWidget(self.browse_button)
 
@@ -540,9 +544,12 @@ class MainWindow(QWidget):
         )
         layout.addWidget(self.file_list)
 
-        self.open_button = QPushButton("Open selected dataset")
+        self.open_button = QPushButton("Ouvrir le dataset sélectionné")
         self.open_button.clicked.connect(self.open_selected_file)
         layout.addWidget(self.open_button)
+        
+        self.open_button_2 = QPushButton("Ouvrir le dataset sélectionné + ROI")
+        layout.addWidget(self.open_button_2)
 
         self.status_label = QLabel(
             "Select or drop a folder containing .PvDatasets files."
