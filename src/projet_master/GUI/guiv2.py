@@ -502,7 +502,7 @@ class MainWindow(QWidget):
         
 
         self.setWindowTitle("MRI Dataset Browser")
-        self.resize(650, 500)
+        self.resize(700, 700)
         self.setAcceptDrops(True)
         # Icone du logo dans la barre de titre et sur la barre des tâches
         self.icon = QIcon(str(LOGO_PATH))
