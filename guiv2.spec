@@ -20,6 +20,14 @@ brkraw_datas.append(
         "brkraw/apps/loader/info",
     )
 )
+gui_hiddenimports = brkraw_hiddenimports + ["projet_master.model_inference"]
+training_only_excludes = [
+    "matplotlib",
+    "networks",
+    "pytorch_lightning",
+    "segmentation_models_pytorch",
+    "timm",
+]
 
 
 a = Analysis(
@@ -31,7 +39,8 @@ a = Analysis(
         (str(gui_directory / "etaplablogo.png"), "."),
         (str(inference_module), "projet_master"),
     ],
-    hiddenimports=brkraw_hiddenimports + ["projet_master.model_inference"],
+    hiddenimports=gui_hiddenimports,
+    excludes=training_only_excludes,
     hookspath=[str(project_root / "pyinstaller_hooks")],
     noarchive=False,
 )
