@@ -2,6 +2,8 @@
 import os
 import pathlib
 import sys
+import logging
+from logging.handlers import RotatingFileHandler
 import cv2
 import numpy as np
 import brkraw
@@ -22,6 +24,8 @@ from PySide6.QtWidgets import (
     QSlider,
     QComboBox,
     QGroupBox,
+    QTableWidget,
+    QTableWidgetItem,
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPolygonItem,
@@ -41,8 +45,48 @@ else:
         os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")
     ) / "stroke-alliance"
 MODEL_DIRECTORY_FILE = CONFIG_DIRECTORY / "model_directory.txt"
+LOG_FILE = CONFIG_DIRECTORY / "guiv2.log"
 PREDICTION_THRESHOLD = 0.5
+VOXEL_WIDTH_MM = 0.07
+VOXEL_HEIGHT_MM = 0.07
+VOXEL_DEPTH_MM = 0.5
+VOXEL_AREA_MM2 = VOXEL_WIDTH_MM * VOXEL_HEIGHT_MM
+VOXEL_VOLUME_MM3 = VOXEL_AREA_MM2 * VOXEL_DEPTH_MM
 LOGO_PATH = pathlib.Path(__file__).resolve().parent / "logo.png"
+
+
+def configure_logging() -> logging.Logger:
+    """Configure le journal applicatif dans un dossier accessible en écriture."""
+    logger = logging.getLogger("stroke_alliance")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    if logger.handlers:
+        return logger
+
+    try:
+        CONFIG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+    except OSError:
+        handler = logging.NullHandler()
+    else:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+            )
+        )
+
+    logger.addHandler(handler)
+    return logger
+
+
+LOGGER = configure_logging()
+
 
 def find_dataset_files(dir_path: str) -> list[str]:
     """Recherche les fichiers .PvDatasets dans un dossier."""
@@ -81,6 +125,23 @@ def scan_label(scan_id, scan_info: dict) -> str:
     """Construit un libellé lisible en conservant l'identifiant du scan."""
     protocol = scan_info.get("Protocol", "Protocol inconnu")
     return f"{scan_id} - {protocol}"
+
+
+def default_scan_index(all_scans: dict) -> int:
+    """Sélectionne par défaut le scan 2 parmi les T2 haute résolution."""
+    high_resolution_scans = [
+        (index, scan_id, scan_info)
+        for index, (scan_id, scan_info) in enumerate(all_scans.items())
+        if "t2_haute_resolution" in str(scan_info.get("Protocol", "")).lower()
+    ]
+    if not high_resolution_scans:
+        return 0
+
+    for index, scan_id, _ in high_resolution_scans:
+        if str(scan_id) == "2":
+            return index
+
+    return high_resolution_scans[min(1, len(high_resolution_scans) - 1)][0]
 
 
 def convert_pvdataset_to_npy(file_path: str, scan_id) -> np.ndarray:
@@ -664,7 +725,7 @@ class MainWindow(QWidget):
                     return
 
             # Sans parent : il s'agit d'une fenêtre principale indépendante.
-            viewer = MRIViewer(file_path, model_directory)
+            viewer = MRIViewer(file_path, model_directory, self.dataset_paths)
             self.viewers.append(viewer)
 
             # Supprime la référence lorsque la fenêtre est détruite.
@@ -718,13 +779,28 @@ class MainWindow(QWidget):
 class MRIViewer(QWidget):
     """Fenêtre indépendante pour parcourir les coupes IRM."""
 
-    def __init__(self, file_path: str, model_directory: pathlib.Path):
+    def __init__(
+        self,
+        file_path: str,
+        model_directory: pathlib.Path,
+        dataset_paths: list[str] | None = None,
+    ):
         super().__init__()
 
         self.file_path = file_path
         self.model_directory = model_directory
+        self.dataset_paths = dataset_paths or [file_path]
+        self.file_index = next(
+            (
+                index
+                for index, dataset_path in enumerate(self.dataset_paths)
+                if dataset_path == file_path
+            ),
+            0,
+        )
         self.volume = None
         self.prediction_masks = None
+        self.original_prediction_masks = None
         self.all_scans = {}
         self.scan_ids = []
         self.predictor = SlicePredictor()
@@ -800,21 +876,14 @@ class MRIViewer(QWidget):
         self.redo_button.setEnabled(False)
         self.redo_button.clicked.connect(self.redo_mask_edit)
         edit_layout.addWidget(self.redo_button)
+        self.reset_mask_button = QPushButton("Réinitialiser les modifications")
+        self.reset_mask_button.setEnabled(False)
+        self.reset_mask_button.clicked.connect(self.reset_mask_edits)
+        edit_layout.addWidget(self.reset_mask_button)
         toolbar.addWidget(edit_group)
 
-        navigation_group = QGroupBox("Navigation")
+        navigation_group = QGroupBox("Affichage")
         navigation_layout = QHBoxLayout(navigation_group)
-        self.previous_button = QPushButton("<")
-        self.previous_button.setToolTip("Coupe précédente")
-        self.previous_button.clicked.connect(self.show_previous_slice)
-        navigation_layout.addWidget(self.previous_button)
-
-        self.next_button = QPushButton(">")
-        self.next_button.setToolTip("Coupe suivante")
-        self.next_button.clicked.connect(self.show_next_slice)
-        navigation_layout.addWidget(self.next_button)
-        
-
         self.fit_button = QPushButton("Reset zoom")
         self.fit_button.setToolTip("Fit the entire MRI slice in the viewer")
         self.fit_button.clicked.connect(self.image_fit)
@@ -824,6 +893,7 @@ class MRIViewer(QWidget):
 
         image_panel = QWidget()
         image_layout = QVBoxLayout(image_panel)
+        image_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.image_label = MRIImageView()
         self.image_label.edit_path_finished.connect(
@@ -841,9 +911,89 @@ class MRIViewer(QWidget):
         self.slice_slider.valueChanged.connect(self.show_slice)
         image_layout.addWidget(self.slice_slider)
 
-        main_layout.addWidget(image_panel)
+        # Le viewer et les résultats occupent la même ligne.
+        content_layout = QHBoxLayout()
+        self.previous_button = QPushButton("<")
+        self.previous_button.setToolTip("Coupe précédente")
+        self.previous_button.clicked.connect(self.show_previous_slice)
+        content_layout.addWidget(self.previous_button)
+        content_layout.addWidget(image_panel, stretch=19)
+        self.next_button = QPushButton(">")
+        self.next_button.setToolTip("Coupe suivante")
+        self.next_button.clicked.connect(self.show_next_slice)
+        content_layout.addWidget(self.next_button)
+
+        result_panel = QWidget()
+        result_layout = QVBoxLayout(result_panel)
+        self.result_label = QLabel("Résultat de la prédiction")
+        self.result_volume_label = QLabel("Volume total : -")
+        file_navigation_layout = QHBoxLayout()
+        self.previous_file_button = QPushButton("Sujet précédent")
+        self.previous_file_button.clicked.connect(
+            lambda: self.navigate_file(-1)
+        )
+        self.next_file_button = QPushButton("Sujet suivant")
+        self.next_file_button.clicked.connect(
+            lambda: self.navigate_file(1)
+        )
+        file_navigation_layout.addWidget(self.previous_file_button)
+        file_navigation_layout.addWidget(self.next_file_button)
+        self.result_table = QTableWidget(0, 3)
+        self.result_table.setHorizontalHeaderLabels(
+            ["Coupe", "Voxels", "Aire (mm²)"]
+        )
+        self.result_table.setMinimumWidth(0)
+        self.result_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.result_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.result_table.currentCellChanged.connect(
+            lambda row, *_: self._select_result_slice(row)
+        )
+        result_layout.addWidget(self.result_label)
+        result_layout.addWidget(self.result_volume_label)
+        result_layout.addLayout(file_navigation_layout)
+        result_layout.addWidget(self.result_table)
+        result_layout.addStretch()
+        self.file_position_label = QLabel()
+        self.file_position_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        result_layout.addWidget(self.file_position_label)
+        content_layout.addWidget(result_panel, stretch=6)
+        main_layout.addLayout(content_layout, stretch=1)
 
         self.load_models()
+        self._update_file_navigation()
+        self.load_file()
+
+    def _update_file_navigation(self):
+        """Met à jour les boutons et la position du fichier courant."""
+        file_count = len(self.dataset_paths)
+        self.previous_file_button.setEnabled(self.file_index > 0)
+        self.next_file_button.setEnabled(self.file_index < file_count - 1)
+        self.file_position_label.setText(
+            f"IRM {self.file_index + 1} / {file_count}"
+        )
+
+    def navigate_file(self, offset: int):
+        """Charge l'IRM précédente ou suivante du dossier."""
+        new_index = self.file_index + offset
+        if not 0 <= new_index < len(self.dataset_paths):
+            return
+
+        self.file_index = new_index
+        self.file_path = self.dataset_paths[self.file_index]
+        self.setWindowTitle(
+            f"MRI Viewer - {os.path.basename(self.file_path)}"
+        )
+        LOGGER.info(
+            "Navigation vers l'IRM %d/%d: %s",
+            self.file_index + 1,
+            len(self.dataset_paths),
+            self.file_path,
+        )
+        self._update_file_navigation()
         self.load_file()
 
     def load_models(self):
@@ -873,21 +1023,35 @@ class MRIViewer(QWidget):
     def load_file(self):
         """Charge le scan IRM sélectionné."""
         try:
-            data, _, all_scans = load_data(self.file_path)
+            _, _, all_scans = load_data(self.file_path)
             self.all_scans = all_scans
             self.scan_ids = list(all_scans)
             self.analysis_combo.blockSignals(True)
-            self.analysis_combo.clear()
-            for scan_id, scan_info in all_scans.items():
-                self.analysis_combo.addItem(scan_label(scan_id, scan_info), scan_id)
-            self.analysis_combo.blockSignals(False)
+            try:
+                self.analysis_combo.clear()
+                for scan_id, scan_info in all_scans.items():
+                    self.analysis_combo.addItem(
+                        scan_label(scan_id, scan_info), scan_id
+                    )
+                if self.scan_ids:
+                    self.analysis_combo.setCurrentIndex(
+                        default_scan_index(all_scans)
+                    )
+            finally:
+                self.analysis_combo.blockSignals(False)
 
+            selected_scan_id = self.analysis_combo.currentData()
+            data, _, _ = load_data(self.file_path, selected_scan_id)
             if data is None:
                 self.slice_label.setText("No MRI volume available")
                 return
 
             self.volume = prepare_volume(data)
             self.prediction_masks = None
+            self.original_prediction_masks = None
+            self.result_table.setRowCount(0)
+            self.result_label.setText("Résultat de la prédiction")
+            self.result_volume_label.setText("Volume total : -")
             self.reset_mask_history()
             self.save_roi_button.setEnabled(False)
             self.set_mask_edit_mode(None)
@@ -932,6 +1096,10 @@ class MRIViewer(QWidget):
                 raise ValueError("Cette analyse ne contient pas de volume exploitable.")
             self.volume = prepare_volume(data)
             self.prediction_masks = None
+            self.original_prediction_masks = None
+            self.result_table.setRowCount(0)
+            self.result_label.setText("Résultat de la prédiction")
+            self.result_volume_label.setText("Volume total : -")
             self.reset_mask_history()
             self.save_roi_button.setEnabled(False)
             self.set_mask_edit_mode(None)
@@ -967,6 +1135,8 @@ class MRIViewer(QWidget):
             # le masque. Cette transposition inverse celle de loader.py ;
             # l'axe des coupes garde le même ordre, sans inversion.
             self.prediction_masks = np.transpose(model_mask, (2, 1, 0))
+            self.original_prediction_masks = self.prediction_masks.copy()
+            self._refresh_result_list()
             self.reset_mask_history()
             self.save_roi_button.setEnabled(True)
             self.crop_mask_button.setEnabled(True)
@@ -987,6 +1157,51 @@ class MRIViewer(QWidget):
         elif mode == "add":
             self.crop_mask_button.setChecked(False)
 
+    def _refresh_result_list(self):
+        """Affiche les voxels et l'aire prédite de chaque coupe."""
+        self.result_table.setRowCount(0)
+        if self.prediction_masks is None:
+            self.result_label.setText("Résultat de la prédiction")
+            self.result_volume_label.setText("Volume total : -")
+            return
+
+        positive_voxels = self.prediction_masks.astype(bool).sum(axis=(0, 1))
+        total_positive = int(positive_voxels.sum())
+        self.result_label.setText(
+            f"Résultat de la prédiction ({total_positive} voxels)"
+        )
+        self.result_volume_label.setText(
+            f"Volume total : {total_positive * VOXEL_VOLUME_MM3:.4f} mm³"
+        )
+        self.result_table.setRowCount(len(positive_voxels))
+        for index, count in enumerate(positive_voxels):
+            self.result_table.setItem(
+                index, 0, QTableWidgetItem(str(index + 1))
+            )
+            self.result_table.setItem(
+                index, 1, QTableWidgetItem(str(int(count)))
+            )
+            self.result_table.setItem(
+                index,
+                2,
+                QTableWidgetItem(f"{count * VOXEL_AREA_MM2:.4f}"),
+            )
+        self.result_table.resizeColumnsToContents()
+
+        current_slice = self.slice_slider.value()
+        if current_slice < self.result_table.rowCount():
+            self.result_table.setCurrentCell(current_slice, 0)
+
+    def _select_result_slice(self, index: int):
+        """Navigue vers la coupe sélectionnée dans le panneau de résultats."""
+        if (
+            index < 0
+            or self.volume is None
+            or index >= self.slice_slider.maximum() + 1
+        ):
+            return
+        self.slice_slider.setValue(index)
+
     def reset_mask_history(self):
         """Supprime l'historique lorsqu'une nouvelle prédiction ou analyse est chargée."""
         self.mask_history = []
@@ -997,6 +1212,14 @@ class MRIViewer(QWidget):
         self.undo_button.setEnabled(self.mask_history_index > 0)
         self.redo_button.setEnabled(
             0 <= self.mask_history_index < len(self.mask_history) - 1
+        )
+        self.reset_mask_button.setEnabled(
+            self.original_prediction_masks is not None
+            and self.prediction_masks is not None
+            and not np.array_equal(
+                self.prediction_masks,
+                self.original_prediction_masks,
+            )
         )
 
     def _record_mask_state(self):
@@ -1014,6 +1237,7 @@ class MRIViewer(QWidget):
         self.mask_history_index -= 1
         self.prediction_masks = self.mask_history[self.mask_history_index].copy()
         self.update_history_buttons()
+        self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
 
     def redo_mask_edit(self):
@@ -1022,6 +1246,18 @@ class MRIViewer(QWidget):
         self.mask_history_index += 1
         self.prediction_masks = self.mask_history[self.mask_history_index].copy()
         self.update_history_buttons()
+        self._refresh_result_list()
+        self.show_slice(self.slice_slider.value())
+
+    def reset_mask_edits(self):
+        """Restaure la prédiction originale en supprimant les modifications."""
+        if self.original_prediction_masks is None:
+            return
+        self.prediction_masks = self.original_prediction_masks.copy()
+        self.mask_history = [self.prediction_masks.copy()]
+        self.mask_history_index = 0
+        self.update_history_buttons()
+        self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
 
     def apply_mask_edit_path(self, points):
@@ -1062,6 +1298,7 @@ class MRIViewer(QWidget):
         self.mask_history.append(self.prediction_masks.copy())
         self.mask_history_index += 1
         self.update_history_buttons()
+        self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
 
     def save_prediction_as_rois(self):
@@ -1134,6 +1371,10 @@ class MRIViewer(QWidget):
             pixmap = add_prediction_overlay(pixmap, mask)
         self.image_label.set_mri_pixmap(pixmap)
         self._update_navigation_buttons()
+        if index < self.result_table.rowCount():
+            self.result_table.blockSignals(True)
+            self.result_table.setCurrentCell(index, 0)
+            self.result_table.blockSignals(False)
         self.slice_label.setText(
             f"Coupe {index + 1} / {self.volume.shape[2]}"
         )
