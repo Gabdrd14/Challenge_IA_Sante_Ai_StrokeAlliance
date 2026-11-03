@@ -28,7 +28,19 @@ from PySide6.QtWidgets import (
 )
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
-MODEL_DIRECTORY_FILE = PROJECT_ROOT / "model_directory.txt"
+if sys.platform == "darwin":
+    CONFIG_DIRECTORY = (
+        pathlib.Path.home() / "Library" / "Application Support" / "StrokeAlliance"
+    )
+elif os.name == "nt":
+    CONFIG_DIRECTORY = pathlib.Path(
+        os.environ.get("APPDATA", pathlib.Path.home() / "AppData" / "Roaming")
+    ) / "StrokeAlliance"
+else:
+    CONFIG_DIRECTORY = pathlib.Path(
+        os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")
+    ) / "stroke-alliance"
+MODEL_DIRECTORY_FILE = CONFIG_DIRECTORY / "model_directory.txt"
 PREDICTION_THRESHOLD = 0.5
 LOGO_PATH = pathlib.Path(__file__).resolve().parent / "logo.png"
 
@@ -180,6 +192,7 @@ def saved_model_directory() -> pathlib.Path | None:
 
 def save_model_directory(model_directory: pathlib.Path) -> None:
     """Enregistre le dossier de modèles pour les prochains lancements."""
+    CONFIG_DIRECTORY.mkdir(parents=True, exist_ok=True)
     MODEL_DIRECTORY_FILE.write_text(
         str(model_directory.resolve()),
         encoding="utf-8",
