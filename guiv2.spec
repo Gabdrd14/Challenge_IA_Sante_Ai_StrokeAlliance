@@ -46,7 +46,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="guiv2",
+    name="STR@KE ALLIANCE MRI VIEWER",
     console=False,
     icon=str(gui_directory / "app_icon.ico"),
     splash=splash,
@@ -57,5 +57,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    name="guiv2",
+    name="STR@KE ALLIANCE MRI VIEWER",
 )
