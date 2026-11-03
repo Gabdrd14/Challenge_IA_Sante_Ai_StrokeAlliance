@@ -53,6 +53,7 @@ VOXEL_DEPTH_MM = 0.5
 VOXEL_AREA_MM2 = VOXEL_WIDTH_MM * VOXEL_HEIGHT_MM
 VOXEL_VOLUME_MM3 = VOXEL_AREA_MM2 * VOXEL_DEPTH_MM
 LOGO_PATH = pathlib.Path(__file__).resolve().parent / "logo.png"
+ETAPLAB_LOGO_PATH = pathlib.Path(__file__).resolve().parent / "etaplablogo.png"
 
 
 def configure_logging() -> logging.Logger:
@@ -346,6 +347,9 @@ def prepare_volume(data: np.ndarray) -> np.ndarray:
 def slice_to_pixmap(
     slice_data: np.ndarray,
     window: tuple[float, float] | None = None,
+    contrast: int = 100,
+    exposure: int = 0,
+    intensity: int = 100,
 ) -> QPixmap:
     """Convertit une coupe IRM pour l'affichage sans modifier les intensités.
 
@@ -374,11 +378,25 @@ def slice_to_pixmap(
     if high <= low:
         high = low + 1.0
 
+    base_range = high - low
+    center = (low + high) / 2.0
+    center += (exposure / 100.0) * base_range
+    adjusted_range = base_range * (100.0 / max(contrast, 1))
+    low = center - adjusted_range / 2.0
+    high = center + adjusted_range / 2.0
+
     # Application de la fenêtre sur une copie destinée à l'affichage.
     # Aucun filtrage ni interpolation n'est appliqué aux pixels natifs.
     scaled = (slice_data.astype(np.float64, copy=False) - low) * (255.0 / (high - low))
     normalized = np.zeros(slice_data.shape, dtype=np.uint8)
     normalized[finite] = np.clip(scaled[finite], 0, 255).round().astype(np.uint8)
+    if intensity != 100:
+        adjusted = (
+            (normalized[finite].astype(np.float64) - 128.0)
+            * (intensity / 100.0)
+            + 128.0
+        )
+        normalized[finite] = np.clip(adjusted, 0, 255).round().astype(np.uint8)
     normalized = np.ascontiguousarray(normalized)
 
     height, width = normalized.shape
@@ -817,26 +835,46 @@ class MRIViewer(QWidget):
 
         main_layout = QVBoxLayout(self)
 
-        # Un libellé contenant le chemin peut être ajouté ici si nécessaire.
-        
-        
+        etaplab_logo = QLabel()
+        etaplab_pixmap = QPixmap(str(ETAPLAB_LOGO_PATH))
+        if not etaplab_pixmap.isNull():
+            etaplab_logo.setPixmap(
+                etaplab_pixmap.scaledToHeight(
+                    38,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            etaplab_logo.setToolTip("ETAP Lab")
+        else:
+            LOGGER.warning("Logo ETAP Lab introuvable: %s", ETAPLAB_LOGO_PATH)
+
         toolbar = QVBoxLayout()
+        toolbar.setSpacing(4)
 
         data_group = QGroupBox("Données")
         data_layout = QHBoxLayout(data_group)
+        data_layout.setContentsMargins(6, 4, 6, 4)
+        data_layout.setSpacing(4)
         self.analysis_combo = QComboBox()
         self.analysis_combo.setToolTip("Choisir le type d'analyse présent dans le PvDataset")
+        self.analysis_combo.setFixedWidth(210)
+        self.analysis_combo.setFixedHeight(30)
         self.analysis_combo.currentIndexChanged.connect(self.change_scan)
-        data_layout.addWidget(self.analysis_combo, stretch=1)
+        data_layout.addWidget(self.analysis_combo)
 
         self.model_combo = QComboBox()
         self.model_combo.setToolTip("Choisir le checkpoint du modèle")
-        data_layout.addWidget(self.model_combo, stretch=1)
-        toolbar.addWidget(data_group)
+        self.model_combo.setFixedWidth(210)
+        self.model_combo.setFixedHeight(30)
+        data_layout.addWidget(self.model_combo)
 
         prediction_group = QGroupBox("Prédiction et export")
         prediction_layout = QHBoxLayout(prediction_group)
+        prediction_layout.setContentsMargins(6, 4, 6, 4)
+        prediction_layout.setSpacing(4)
         self.analyze_button = QPushButton("Analyser toutes les coupes")
+        self.analyze_button.setFixedWidth(190)
+        self.analyze_button.setFixedHeight(30)
         self.analyze_button.clicked.connect(self.analyze_volume)
         prediction_layout.addWidget(self.analyze_button)
 
@@ -844,16 +882,32 @@ class MRIViewer(QWidget):
         self.save_roi_button.setToolTip(
             "Exporter les contours prédits dans un fichier ROI ZIP"
         )
+        self.save_roi_button.setFixedWidth(150)
+        self.save_roi_button.setFixedHeight(30)
         self.save_roi_button.setEnabled(False)
         self.save_roi_button.clicked.connect(self.save_prediction_as_rois)
         prediction_layout.addWidget(self.save_roi_button)
-        toolbar.addWidget(prediction_group)
+
+        top_controls_layout = QHBoxLayout()
+        top_controls_layout.setSpacing(4)
+        top_controls_layout.addWidget(data_group)
+        top_controls_layout.addWidget(prediction_group)
+        top_controls_layout.addStretch()
+        top_controls_layout.addWidget(
+            etaplab_logo,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        toolbar.addLayout(top_controls_layout)
 
         edit_group = QGroupBox("Édition du masque")
         edit_layout = QHBoxLayout(edit_group)
+        edit_layout.setContentsMargins(6, 4, 6, 4)
+        edit_layout.setSpacing(4)
         self.crop_mask_button = QPushButton("Rogner le masque")
         self.crop_mask_button.setEnabled(False)
         self.crop_mask_button.setCheckable(True)
+        self.crop_mask_button.setFixedWidth(150)
+        self.crop_mask_button.setFixedHeight(30)
         self.crop_mask_button.clicked.connect(
             lambda checked: self.set_mask_edit_mode("crop" if checked else None)
         )
@@ -862,6 +916,8 @@ class MRIViewer(QWidget):
         self.add_mask_button = QPushButton("Ajouter une zone")
         self.add_mask_button.setEnabled(False)
         self.add_mask_button.setCheckable(True)
+        self.add_mask_button.setFixedWidth(140)
+        self.add_mask_button.setFixedHeight(30)
         self.add_mask_button.clicked.connect(
             lambda checked: self.set_mask_edit_mode("add" if checked else None)
         )
@@ -869,26 +925,25 @@ class MRIViewer(QWidget):
 
         self.undo_button = QPushButton("Undo")
         self.undo_button.setEnabled(False)
+        self.undo_button.setFixedWidth(80)
+        self.undo_button.setFixedHeight(30)
         self.undo_button.clicked.connect(self.undo_mask_edit)
         edit_layout.addWidget(self.undo_button)
 
         self.redo_button = QPushButton("Redo")
         self.redo_button.setEnabled(False)
+        self.redo_button.setFixedWidth(80)
+        self.redo_button.setFixedHeight(30)
         self.redo_button.clicked.connect(self.redo_mask_edit)
         edit_layout.addWidget(self.redo_button)
         self.reset_mask_button = QPushButton("Réinitialiser les modifications")
         self.reset_mask_button.setEnabled(False)
+        self.reset_mask_button.setFixedWidth(215)
+        self.reset_mask_button.setFixedHeight(30)
         self.reset_mask_button.clicked.connect(self.reset_mask_edits)
         edit_layout.addWidget(self.reset_mask_button)
         toolbar.addWidget(edit_group)
 
-        navigation_group = QGroupBox("Affichage")
-        navigation_layout = QHBoxLayout(navigation_group)
-        self.fit_button = QPushButton("Reset zoom")
-        self.fit_button.setToolTip("Fit the entire MRI slice in the viewer")
-        self.fit_button.clicked.connect(self.image_fit)
-        navigation_layout.addWidget(self.fit_button)
-        toolbar.addWidget(navigation_group)
         main_layout.addLayout(toolbar)
 
         image_panel = QWidget()
@@ -910,6 +965,16 @@ class MRIViewer(QWidget):
         self.slice_slider.setEnabled(False)
         self.slice_slider.valueChanged.connect(self.show_slice)
         image_layout.addWidget(self.slice_slider)
+
+        viewer_controls_layout = QHBoxLayout()
+        viewer_controls_layout.addStretch()
+        self.fit_button = QPushButton("Reset zoom")
+        self.fit_button.setFixedWidth(100)
+        self.fit_button.setFixedHeight(26)
+        self.fit_button.setToolTip("Fit the entire MRI slice in the viewer")
+        self.fit_button.clicked.connect(self.image_fit)
+        viewer_controls_layout.addWidget(self.fit_button)
+        image_layout.addLayout(viewer_controls_layout)
 
         # Le viewer et les résultats occupent la même ligne.
         content_layout = QHBoxLayout()
@@ -957,6 +1022,43 @@ class MRIViewer(QWidget):
         result_layout.addLayout(file_navigation_layout)
         result_layout.addWidget(self.result_table)
         result_layout.addStretch()
+        display_controls = QGroupBox("Réglages d'affichage")
+        display_controls_layout = QVBoxLayout(display_controls)
+        self.contrast_label = QLabel("Contraste : 100 %")
+        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
+        self.contrast_slider.setRange(10, 300)
+        self.contrast_slider.setValue(100)
+        self.contrast_slider.valueChanged.connect(
+            self._update_display_controls
+        )
+        display_controls_layout.addWidget(self.contrast_label)
+        display_controls_layout.addWidget(self.contrast_slider)
+
+        self.exposure_label = QLabel("Exposition : 0 %")
+        self.exposure_slider = QSlider(Qt.Orientation.Horizontal)
+        self.exposure_slider.setRange(-100, 100)
+        self.exposure_slider.setValue(0)
+        self.exposure_slider.valueChanged.connect(
+            self._update_display_controls
+        )
+        display_controls_layout.addWidget(self.exposure_label)
+        display_controls_layout.addWidget(self.exposure_slider)
+
+        self.intensity_label = QLabel("Intensité : 100 %")
+        self.intensity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.intensity_slider.setRange(0, 200)
+        self.intensity_slider.setValue(100)
+        self.intensity_slider.valueChanged.connect(
+            self._update_display_controls
+        )
+        display_controls_layout.addWidget(self.intensity_label)
+        display_controls_layout.addWidget(self.intensity_slider)
+
+        self.reset_display_button = QPushButton("Réinitialiser l'affichage")
+        self.reset_display_button.clicked.connect(self.reset_display_controls)
+        display_controls_layout.addWidget(self.reset_display_button)
+        result_layout.addWidget(display_controls)
+
         self.file_position_label = QLabel()
         self.file_position_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         result_layout.addWidget(self.file_position_label)
@@ -967,13 +1069,99 @@ class MRIViewer(QWidget):
         self._update_file_navigation()
         self.load_file()
 
+    def _update_display_controls(self):
+        """Actualise les réglages visuels appliqués à toutes les coupes."""
+        contrast = self.contrast_slider.value()
+        exposure = self.exposure_slider.value()
+        intensity = self.intensity_slider.value()
+        self.contrast_label.setText(f"Contraste : {contrast} %")
+        self.exposure_label.setText(f"Exposition : {exposure} %")
+        self.intensity_label.setText(f"Intensité : {intensity} %")
+        if self.volume is not None:
+            self.show_slice(self.slice_slider.value())
+
+    def reset_display_controls(self):
+        """Restaure les réglages d'affichage par défaut."""
+        self.contrast_slider.setValue(100)
+        self.exposure_slider.setValue(0)
+        self.intensity_slider.setValue(100)
+
+    def calibrate_display(self):
+        """Calibre l'affichage sur les intensités valides de toutes les coupes."""
+        if self.volume is None:
+            return
+
+        finite_values = self.volume[np.isfinite(self.volume)]
+        if finite_values.size == 0:
+            QMessageBox.warning(
+                self,
+                "Calibration impossible",
+                "Le volume ne contient aucune intensité valide.",
+            )
+            LOGGER.warning(
+                "Calibration impossible: aucune intensité valide dans %s",
+                self.file_path,
+            )
+            return
+
+        low, high = np.percentile(finite_values, (0.5, 99.5))
+        if high <= low:
+            low, high = float(finite_values.min()), float(finite_values.max())
+        if high <= low:
+            high = low + 1.0
+
+        dynamic_range = high - low
+        median = float(np.median(finite_values))
+        standard_deviation = float(np.std(finite_values))
+        window_center = (low + high) / 2.0
+
+        calibrated_contrast = int(
+            np.clip(
+                100.0 * dynamic_range / max(6.0 * standard_deviation, 1e-8),
+                10,
+                300,
+            )
+        )
+        calibrated_exposure = int(
+            np.clip(
+                -100.0 * (median - window_center) / (dynamic_range / 2.0),
+                -100,
+                100,
+            )
+        )
+        calibrated_intensity = int(
+            np.clip(
+                100.0 * standard_deviation / max(dynamic_range / 4.0, 1e-8),
+                0,
+                200,
+            )
+        )
+
+        self.display_window = (float(low), float(high))
+        self.contrast_slider.setValue(calibrated_contrast)
+        self.exposure_slider.setValue(calibrated_exposure)
+        self.intensity_slider.setValue(calibrated_intensity)
+        LOGGER.info(
+            (
+                "Calibration automatique appliquée à %s: fenêtre=(%.4f, %.4f), "
+                "contraste=%d, exposition=%d, intensité=%d"
+            ),
+            self.file_path,
+            low,
+            high,
+            calibrated_contrast,
+            calibrated_exposure,
+            calibrated_intensity,
+        )
+        self.show_slice(self.slice_slider.value())
+
     def _update_file_navigation(self):
         """Met à jour les boutons et la position du fichier courant."""
         file_count = len(self.dataset_paths)
         self.previous_file_button.setEnabled(self.file_index > 0)
         self.next_file_button.setEnabled(self.file_index < file_count - 1)
         self.file_position_label.setText(
-            f"IRM {self.file_index + 1} / {file_count}"
+            f"Sujet {self.file_index + 1} / {file_count}"
         )
 
     def navigate_file(self, offset: int):
@@ -1363,7 +1551,13 @@ class MRIViewer(QWidget):
         slice_data = np.rot90(slice_data, k=4)
 
         
-        pixmap = slice_to_pixmap(slice_data, self.display_window)
+        pixmap = slice_to_pixmap(
+            slice_data,
+            self.display_window,
+            self.contrast_slider.value(),
+            self.exposure_slider.value(),
+            self.intensity_slider.value(),
+        )
         if self.prediction_masks is not None:
             mask = self.prediction_masks[:, :, index]
             mask = np.transpose(mask)

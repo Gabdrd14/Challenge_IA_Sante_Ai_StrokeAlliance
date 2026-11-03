@@ -28,6 +28,7 @@ a = Analysis(
     datas=brkraw_datas
     + [
         (str(gui_directory / "logo.png"), "."),
+        (str(gui_directory / "etaplablogo.png"), "."),
         (str(inference_module), "projet_master"),
     ],
     hiddenimports=brkraw_hiddenimports + ["projet_master.model_inference"],
