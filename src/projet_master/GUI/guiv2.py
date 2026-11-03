@@ -831,6 +831,8 @@ class MRIViewer(QWidget):
         self.setWindowTitle(
             f"MRI Viewer - {os.path.basename(file_path)}"
         )
+        self.setWindowIcon(QIcon(str(LOGO_PATH)))
+        
         self.resize(1100, 750)
 
         main_layout = QVBoxLayout(self)
