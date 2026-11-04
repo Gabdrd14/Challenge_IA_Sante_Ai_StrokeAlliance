@@ -346,17 +346,11 @@ def prepare_volume(data: np.ndarray) -> np.ndarray:
 
 def slice_to_pixmap(
     slice_data: np.ndarray,
-    window: tuple[float, float] | None = None,
     contrast: int = 100,
-    exposure: int = 0,
     intensity: int = 100,
+    saturation: int = 0,
 ) -> QPixmap:
-    """Convertit une coupe IRM pour l'affichage sans modifier les intensités.
-
-    Une fenêtre calculée sur le volume complet doit être fournie afin que le
-    contraste reste stable entre les coupes. Seule la copie d'affichage est
-    convertie en niveaux de gris 8 bits ; le volume original reste inchangé.
-    """
+    """Convertit une coupe IRM en niveaux de gris avec les réglages demandés."""
     slice_data = np.asarray(slice_data)
     if slice_data.ndim != 2:
         raise ValueError(f"Expected a 2D MRI slice, got {slice_data.shape}")
@@ -366,28 +360,21 @@ def slice_to_pixmap(
         raise ValueError("MRI slice contains no finite intensity values.")
 
     values = slice_data[finite].astype(np.float64, copy=False)
-    if window is None:
-        # Valeur de secours pour une utilisation isolée. Le viewer fournit
-        # une fenêtre calculée sur l'ensemble du volume.
-        low, high = np.percentile(values, (1.0, 99.5))
-    else:
-        low, high = window
-
+    low, high = np.percentile(values, (1.0, 99.5))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         low, high = float(values.min()), float(values.max())
     if high <= low:
         high = low + 1.0
 
-    base_range = high - low
     center = (low + high) / 2.0
-    center += (exposure / 100.0) * base_range
-    adjusted_range = base_range * (100.0 / max(contrast, 1))
-    low = center - adjusted_range / 2.0
-    high = center + adjusted_range / 2.0
-
-    # Application de la fenêtre sur une copie destinée à l'affichage.
-    # Aucun filtrage ni interpolation n'est appliqué aux pixels natifs.
-    scaled = (slice_data.astype(np.float64, copy=False) - low) * (255.0 / (high - low))
+    display_range = (high - low) * (100.0 / max(contrast, 1))
+    # La saturation resserre ou élargit la plage visible autour de son centre.
+    display_range *= max(0.01, 1.0 - saturation / 100.0)
+    low = center - display_range / 2.0
+    high = center + display_range / 2.0
+    scaled = (slice_data.astype(np.float64, copy=False) - low) * (
+        255.0 / (high - low)
+    )
     normalized = np.zeros(slice_data.shape, dtype=np.uint8)
     normalized[finite] = np.clip(scaled[finite], 0, 255).round().astype(np.uint8)
     if intensity != 100:
@@ -397,14 +384,14 @@ def slice_to_pixmap(
             + 128.0
         )
         normalized[finite] = np.clip(adjusted, 0, 255).round().astype(np.uint8)
-    normalized = np.ascontiguousarray(normalized)
+    raw = np.ascontiguousarray(normalized)
 
-    height, width = normalized.shape
+    height, width = raw.shape
     image = QImage(
-        normalized.data,
+        raw.data,
         width,
         height,
-        normalized.strides[0],
+        raw.strides[0],
         QImage.Format.Format_Grayscale8,
     ).copy()  # Détache le QImage de la mémoire NumPy.
     return QPixmap.fromImage(image)
@@ -823,7 +810,6 @@ class MRIViewer(QWidget):
         self.scan_ids = []
         self.predictor = SlicePredictor()
         self.model_paths = []
-        self.display_window = None
         self.mask_edit_mode = None
         self.mask_history = []
         self.mask_history_index = -1
@@ -1030,31 +1016,25 @@ class MRIViewer(QWidget):
         self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
         self.contrast_slider.setRange(10, 300)
         self.contrast_slider.setValue(100)
-        self.contrast_slider.valueChanged.connect(
-            self._update_display_controls
-        )
+        self.contrast_slider.valueChanged.connect(self._update_display_controls)
         display_controls_layout.addWidget(self.contrast_label)
         display_controls_layout.addWidget(self.contrast_slider)
-
-        self.exposure_label = QLabel("Exposition : 0 %")
-        self.exposure_slider = QSlider(Qt.Orientation.Horizontal)
-        self.exposure_slider.setRange(-100, 100)
-        self.exposure_slider.setValue(0)
-        self.exposure_slider.valueChanged.connect(
-            self._update_display_controls
-        )
-        display_controls_layout.addWidget(self.exposure_label)
-        display_controls_layout.addWidget(self.exposure_slider)
 
         self.intensity_label = QLabel("Intensité : 100 %")
         self.intensity_slider = QSlider(Qt.Orientation.Horizontal)
         self.intensity_slider.setRange(0, 200)
         self.intensity_slider.setValue(100)
-        self.intensity_slider.valueChanged.connect(
-            self._update_display_controls
-        )
+        self.intensity_slider.valueChanged.connect(self._update_display_controls)
         display_controls_layout.addWidget(self.intensity_label)
         display_controls_layout.addWidget(self.intensity_slider)
+
+        self.saturation_label = QLabel("Saturation : 0 %")
+        self.saturation_slider = QSlider(Qt.Orientation.Horizontal)
+        self.saturation_slider.setRange(-100, 100)
+        self.saturation_slider.setValue(0)
+        self.saturation_slider.valueChanged.connect(self._update_display_controls)
+        display_controls_layout.addWidget(self.saturation_label)
+        display_controls_layout.addWidget(self.saturation_slider)
 
         self.reset_display_button = QPushButton("Réinitialiser l'affichage")
         self.reset_display_button.clicked.connect(self.reset_display_controls)
@@ -1073,22 +1053,17 @@ class MRIViewer(QWidget):
 
     def _update_display_controls(self):
         """Actualise les réglages visuels appliqués à toutes les coupes."""
-        contrast = self.contrast_slider.value()
-        exposure = self.exposure_slider.value()
-        intensity = self.intensity_slider.value()
-        self.contrast_label.setText(f"Contraste : {contrast} %")
-        self.exposure_label.setText(f"Exposition : {exposure} %")
-        self.intensity_label.setText(f"Intensité : {intensity} %")
+        self.contrast_label.setText(f"Contraste : {self.contrast_slider.value()} %")
+        self.intensity_label.setText(f"Intensité : {self.intensity_slider.value()} %")
+        self.saturation_label.setText(f"Saturation : {self.saturation_slider.value()} %")
         if self.volume is not None:
             self.show_slice(self.slice_slider.value())
 
     def reset_display_controls(self):
         """Restaure les réglages d'affichage par défaut."""
         self.contrast_slider.setValue(100)
-        self.exposure_slider.setValue(0)
         self.intensity_slider.setValue(100)
-
-
+        self.saturation_slider.setValue(0)
 
     def _update_file_navigation(self):
         """Met à jour les boutons et la position du fichier courant."""
@@ -1181,15 +1156,6 @@ class MRIViewer(QWidget):
             self.crop_mask_button.setEnabled(False)
             self.add_mask_button.setEnabled(False)
 
-            # Calcule une fenêtre de contraste robuste sur le volume complet
-            # pour conserver une luminosité stable entre les coupes.
-            finite_values = self.volume[np.isfinite(self.volume)]
-            if finite_values.size:
-                low, high = np.percentile(finite_values, (1.0, 99.5))
-                if high <= low:
-                    low, high = float(finite_values.min()), float(finite_values.max())
-                self.display_window = (float(low), float(high))
-
             number_of_slices = self.volume.shape[2]
 
             self.slice_slider.setRange(0, number_of_slices - 1)
@@ -1228,11 +1194,6 @@ class MRIViewer(QWidget):
             self.set_mask_edit_mode(None)
             self.crop_mask_button.setEnabled(False)
             self.add_mask_button.setEnabled(False)
-            self.display_window = None
-            finite_values = self.volume[np.isfinite(self.volume)]
-            if finite_values.size:
-                low, high = np.percentile(finite_values, (1.0, 99.5))
-                self.display_window = (float(low), float(high))
             self.slice_slider.setRange(0, self.volume.shape[2] - 1)
             self.slice_slider.setValue(0)
             self.show_slice(0)
@@ -1488,10 +1449,9 @@ class MRIViewer(QWidget):
         
         pixmap = slice_to_pixmap(
             slice_data,
-            self.display_window,
             self.contrast_slider.value(),
-            self.exposure_slider.value(),
             self.intensity_slider.value(),
+            self.saturation_slider.value(),
         )
         if self.prediction_masks is not None:
             mask = self.prediction_masks[:, :, index]
