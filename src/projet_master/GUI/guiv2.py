@@ -1088,74 +1088,7 @@ class MRIViewer(QWidget):
         self.exposure_slider.setValue(0)
         self.intensity_slider.setValue(100)
 
-    def calibrate_display(self):
-        """Calibre l'affichage sur les intensités valides de toutes les coupes."""
-        if self.volume is None:
-            return
 
-        finite_values = self.volume[np.isfinite(self.volume)]
-        if finite_values.size == 0:
-            QMessageBox.warning(
-                self,
-                "Calibration impossible",
-                "Le volume ne contient aucune intensité valide.",
-            )
-            LOGGER.warning(
-                "Calibration impossible: aucune intensité valide dans %s",
-                self.file_path,
-            )
-            return
-
-        low, high = np.percentile(finite_values, (0.5, 99.5))
-        if high <= low:
-            low, high = float(finite_values.min()), float(finite_values.max())
-        if high <= low:
-            high = low + 1.0
-
-        dynamic_range = high - low
-        median = float(np.median(finite_values))
-        standard_deviation = float(np.std(finite_values))
-        window_center = (low + high) / 2.0
-
-        calibrated_contrast = int(
-            np.clip(
-                100.0 * dynamic_range / max(6.0 * standard_deviation, 1e-8),
-                10,
-                300,
-            )
-        )
-        calibrated_exposure = int(
-            np.clip(
-                -100.0 * (median - window_center) / (dynamic_range / 2.0),
-                -100,
-                100,
-            )
-        )
-        calibrated_intensity = int(
-            np.clip(
-                100.0 * standard_deviation / max(dynamic_range / 4.0, 1e-8),
-                0,
-                200,
-            )
-        )
-
-        self.display_window = (float(low), float(high))
-        self.contrast_slider.setValue(calibrated_contrast)
-        self.exposure_slider.setValue(calibrated_exposure)
-        self.intensity_slider.setValue(calibrated_intensity)
-        LOGGER.info(
-            (
-                "Calibration automatique appliquée à %s: fenêtre=(%.4f, %.4f), "
-                "contraste=%d, exposition=%d, intensité=%d"
-            ),
-            self.file_path,
-            low,
-            high,
-            calibrated_contrast,
-            calibrated_exposure,
-            calibrated_intensity,
-        )
-        self.show_slice(self.slice_slider.value())
 
     def _update_file_navigation(self):
         """Met à jour les boutons et la position du fichier courant."""
