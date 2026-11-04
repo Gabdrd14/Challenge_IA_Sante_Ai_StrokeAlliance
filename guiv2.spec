@@ -44,10 +44,7 @@ a = Analysis(
     hookspath=[str(project_root / "pyinstaller_hooks")],
     noarchive=False,
 )
-splash = Splash(
-    str(gui_directory / "logo.png"),
-    binaries=a.binaries,
-    datas=a.datas,
+
 )
 pyz = PYZ(a.pure)
 exe = EXE(
@@ -58,7 +55,6 @@ exe = EXE(
     name="STR@KE ALLIANCE MRI VIEWER",
     console=False,
     icon=str(gui_directory / "app_icon.ico"),
-    splash=splash,
 )
 coll = COLLECT(
     exe,
