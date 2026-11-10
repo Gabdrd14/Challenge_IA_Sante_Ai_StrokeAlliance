@@ -1,1 +1,11 @@
 .DS_Store
+/dist
+/build
+/DATA_AVC_NPY
+__pycache__
+/lightning_logs
+FULLMRI
+/HEMO
+/RAT
+test_model.py
+.gitignore
