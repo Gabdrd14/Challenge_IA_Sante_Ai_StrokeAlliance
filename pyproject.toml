@@ -18,6 +18,7 @@ dependencies = [
     "roifile>=2026.2.10",
     "scipy>=1.17.1",
     "segmentation-models-pytorch>=0.5.0",
+    "tensorboard>=2.20.0",
     "torch>=2.14.1",
 ]
 

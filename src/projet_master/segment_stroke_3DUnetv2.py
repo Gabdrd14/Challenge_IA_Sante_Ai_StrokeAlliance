@@ -6,6 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 from monai.networks.nets.dynunet import DynUNet
 
 class AVCDataset(Dataset):
@@ -180,8 +181,10 @@ if __name__ == "__main__":
 
     pl.seed_everything(0)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     data_module = AVCDataModule(data_dir="./DATA_AVC_NPY", batch_size=2,
-                            etudes=("Etude_1", "Etude_3"))
+                            etudes=("Etude_1","Etude_2", "Etude_3","Etude_4", "Etude_5", "Etude_6", "Etude_7"))
     
     data_module.setup()
 
@@ -193,8 +196,19 @@ if __name__ == "__main__":
     train_dataloader = data_module.train_dataloader()
     val_dataloader = data_module.val_dataloader()
 
+    model.to(device)
+
     ckpt = ModelCheckpoint(monitor="val_dice", mode="max", save_top_k=1)
-    trainer = pl.Trainer(max_epochs=100, accelerator="auto", devices=1, callbacks=[ckpt])
+    logger = TensorBoardLogger(save_dir="logs", name="3d-unet", version=7)
+    print(f"TensorBoard logs: {logger.log_dir}")
+    print("Start TensorBoard with: uv run --no-sync tensorboard --logdir logs")
+    trainer = pl.Trainer(
+        max_epochs=100,
+        accelerator="gpu",
+        devices=1,
+        callbacks=[ckpt],
+        logger=logger,
+    )
     trainer.fit(model, train_dataloader, val_dataloader)
 
     results = trainer.test(model, data_module.test_dataloader(), ckpt_path="best")
