@@ -2306,8 +2306,9 @@ class MRIViewer(QWidget):
 
     def _selected_voxel_constants(self):
         model_path = self.model_combo.currentData()
-        model_name = str(model_path).casefold() if model_path is not None else ""
-        if "rat" in model_name:
+        model_name = str(model_path) if model_path is not None else ""
+        #print(model_name)
+        if "RAT" in model_name:
             return VOXEL_AREA_MM2_RAT, VOXEL_VOLUME_MM3_RAT
         return VOXEL_AREA_MM2, VOXEL_VOLUME_MM3
 
