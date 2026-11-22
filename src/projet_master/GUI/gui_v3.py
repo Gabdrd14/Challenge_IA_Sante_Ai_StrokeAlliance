@@ -6,6 +6,9 @@ import logging
 from logging.handlers import RotatingFileHandler
 import cv2
 import numpy as np
+
+import torch
+
 import brkraw
 from roifile import ImagejRoi, ROI_TYPE, roiwrite
 
@@ -37,6 +40,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
     QGraphicsPathItem,
+    QDialog
 )
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -389,7 +393,7 @@ class SlicePredictor:
         self.checkpoint = None
 
     def _load_model(self, checkpoint: pathlib.Path):
-        import torch
+        #import torch
 
         self.device = torch.device(
             "mps"
@@ -412,7 +416,7 @@ class SlicePredictor:
 
     def predict(self, model_volume: np.ndarray, checkpoint: pathlib.Path) -> np.ndarray:
         """Prédit un volume converti au format d'entraînement (D, H, W)."""
-        import torch
+        #import torch
 
         if self.model is None or self.checkpoint != checkpoint:
             self._load_model(checkpoint)
@@ -982,6 +986,12 @@ class MainWindow(QWidget):
         self.model_directory_button.clicked.connect(self.choose_model_directory)
         layout.addWidget(self.model_directory_button)
 
+
+        self.model_button = QPushButton("Spécifiez votre modèle (Souris (Lésion, Hémmoragies) ou Rats)")
+        self.model_button.clicked.connect(self.choose_model)
+        layout.addWidget(self.model_button)
+
+
         self.model_warning_label = QLabel()
         self.model_warning_label.setWordWrap(True)
         self.model_warning_label.setStyleSheet(
@@ -1067,6 +1077,22 @@ class MainWindow(QWidget):
         self.status_label.setText("Dossier des modèles enregistré.")
         return model_directory
 
+
+    def choose_model(self):
+        current_directory = saved_model_directory()
+        model_file, _ = QFileDialog.getOpenFileName(self, "Choix du modèle", str(current_directory or PROJECT_ROOT))
+        if not model_file:
+            return
+        model_path = pathlib.Path(model_file)
+        if not model_path.name.endswith(".ckpt"):
+            QMessageBox.warning(self, "Mauvais fichier", f"Le fichier {model_path.name} ne contient pas de modèle.")
+            return
+        self.model_checkpoint = model_path
+        model_file_directory = model_path.parent
+        save_model_directory(model_file_directory)
+        self._refresh_model_directory_label()
+        
+
     def load_folder(self, dir_path: str):
         """Remplit la liste avec les datasets du dossier sélectionné."""
         files = find_dataset_files(dir_path)
@@ -1095,6 +1121,134 @@ class MainWindow(QWidget):
         self.status_label.setText(
             f"{len(files)} dataset(s) found. Double-click to open."
         )
+
+        self.open_study_analysis_dialog()
+
+    def open_study_analysis_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Analyse de l'étude")
+        layout = QVBoxLayout()
+        dialog.setLayout(layout)
+        label = QLabel("Voulez-vous analyser l'étude entière ?")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(label)
+        yes_button = QPushButton("Oui")
+        no_button = QPushButton("Non")
+        yes_button.clicked.connect(lambda: self.open_rois_saving_dialog(dialog))
+        no_button.clicked.connect(dialog.reject)
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addWidget(yes_button)
+        buttons_layout.addWidget(no_button)
+        layout.addLayout(buttons_layout)
+        dialog.exec()
+
+    def open_rois_saving_dialog(self, dialog):
+        dialog.accept()
+        rois_saving_dir_path = QFileDialog.getExistingDirectory(self, "Enregistrement des ROI", os.getcwd())
+        if not rois_saving_dir_path:
+            return
+        self.rois_saving_dir_path = rois_saving_dir_path
+        self.analyze_study()
+
+    def analyze_study(self):
+        def compute_quartiles(sup05_pixels: list[float], sub05_pixels: list[float]) -> tuple[float, float]:
+            sup05_quartile = np.quantile(sup05_pixels, q=0.25)
+            sub05_quartile = np.quantile(sub05_pixels, q=0.75)
+            return sup05_quartile, sub05_quartile
+        
+        def warning(prob_volume: np.ndarray, binary_mask: np.ndarray, sup_quartile: float, sub_quartile: float) -> bool:
+            sub05 = prob_volume[prob_volume < PREDICTION_THRESHOLD]
+            sub_q = np.quantile(sub05, 0.75) # x such that 75% fall below / 25% above
+            sup05 = prob_volume[prob_volume >= PREDICTION_THRESHOLD]
+            sup_q = np.quantile(sup05, 0.25) # x such that 25% fall below / 75% above
+            # interval = [sub_quartile, 0.5, sup_quartile]
+            in_interval = sub_q >= sub_quartile and sup_q <= sup_quartile
+            more_than_one_contour = False
+            slices_width = prob_volume.shape[2]
+            region_of_interest_on_the_right = False
+            for slice_mask in binary_mask:
+                if np.sum(slice_mask) == 0:
+                    continue
+                contours, _ = cv2.findContours(slice_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                if len(contours) >= 2:
+                    more_than_one_contour = True
+                    break
+                left_slice = slice_mask[:, :slices_width]
+                right_slice = slice_mask[:, slices_width:]
+                if np.sum(left_slice) <= np.sum(right_slice):
+                    region_of_interest_on_the_right = True
+                    break
+            # in interval = low confidence -> warning / more than one contour -> warning / roi on the reight -> warning
+            if in_interval:
+                print("in interval", sub_q, sub_quartile, sup_q, sup_quartile)
+            if more_than_one_contour:
+                print("more than one", len(contours))
+            if region_of_interest_on_the_right:
+                print("roi right", np.sum(left_slice), np.sum(right_slice))
+            return in_interval or more_than_one_contour or region_of_interest_on_the_right
+        
+        if not self.dataset_paths:
+            QMessageBox.warning(self, "Dossier vide", "Choisissez un dossier d'une étude avant de lancer l'analyse")
+            return
+        if not self.rois_saving_dir_path:
+            QMessageBox.warning(self, "Dossier non sélectionné", "Choisissez un dossier pour enregistrer les ROI avant de lancer l'analyse")
+            return
+        
+        sup05_pixels = []
+        sub05_pixels = []
+        self.predictor = SlicePredictor()
+        temp_save_dir = "./temp_save_dir"
+        os.mkdir(temp_save_dir)
+        for i, file_path in enumerate(self.dataset_paths):
+            _, _, all_scans = load_data(file_path)
+            scan_id = default_scan_index(all_scans)
+            try:
+                volume = convert_pvdataset_to_npy(file_path, scan_id)
+            except ValueError:
+                QMessageBox.critical(self, "Erreur de chargement", f"Le fichier {file_path} n'a pas pu être traité")
+                continue
+            try:
+                probs = self.predictor.predict(volume, self.model_checkpoint)
+            except RuntimeError:
+                QMessageBox.critical(self, "Erreur de traitement", f"Le fichier {file_path} n'a pas pu être traité")
+                continue
+            ones = probs[probs >= PREDICTION_THRESHOLD]
+            zeros = probs[probs < PREDICTION_THRESHOLD]
+            sup05_pixels.extend(ones.tolist())
+            sub05_pixels.extend(zeros.tolist())
+            np.save(os.path.join(temp_save_dir, f"probs_{i}"), probs)
+        sup05_quartile, sub05_quartile = compute_quartiles(sup05_pixels, sub05_pixels)
+        warning_files = []
+        #assert len(list(os.scandir(temp_save_dir))) == len(self.dataset_paths), "Different number of saved probs masks than datasets paths"
+        for entry, file_path in zip(os.scandir(temp_save_dir), self.dataset_paths):
+            probs = np.load(entry.path)
+            binary_mask = (probs >= PREDICTION_THRESHOLD).astype(np.uint8)
+            if warning(probs, binary_mask, sup05_quartile, sub05_quartile):
+                warning_files.append(file_path)
+            save_prediction_rois(binary_mask, os.path.join(self.rois_saving_dir_path, os.path.basename(file_path)))
+        for entry in os.scandir(temp_save_dir):
+            os.remove(entry.path)
+        os.rmdir(temp_save_dir)
+        self.warning_files = warning_files
+        print(len(warning_files))
+        self.open_warnings()
+
+    def open_warnings(self):
+        dialog = QDialog(self)
+        layout = QVBoxLayout()
+        dialog.setLayout(layout)
+        self.warning_file_list = QListWidget()
+        for file in self.warning_files:
+            self.warning_file_list.addItem(os.path.basename(file))
+        self.warning_file_list.setCurrentRow(0)
+        self.warning_file_list.itemDoubleClicked.connect(lambda item: self.open_selected_file_and_roi(item))
+        layout.addWidget(self.warning_file_list)
+        dialog.show()
+
+    def open_selected_file_and_roi(self, item):
+        row = self.warning_file_list.row(item)
+        file = self.warning_files[row]
+        # open viewer with roi
 
     def open_selected_file(self):
         """Ouvre le dataset sélectionné dans une fenêtre séparée."""
