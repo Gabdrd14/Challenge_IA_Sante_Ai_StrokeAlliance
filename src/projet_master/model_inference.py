@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import torch.nn.functional as F
 import torch
 from monai.networks.nets import DynUNet
 
@@ -24,7 +25,13 @@ class AVCInferenceModel(torch.nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.model(inputs)
+        h, w = inputs.shape[-2:]
+        padded = F.pad(
+            inputs,
+            (0, (-w) % 16, 0, (-h) % 16),
+        )
+        logits = self.model(padded)
+        return logits[..., :h, :w]
 
 
 def load_inference_model(
