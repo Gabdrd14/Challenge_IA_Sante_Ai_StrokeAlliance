@@ -20,7 +20,16 @@ brkraw_datas.append(
         "brkraw/apps/loader/info",
     )
 )
-gui_hiddenimports = brkraw_hiddenimports + ["projet_master.model_inference"]
+roifile_hiddenimports = collect_submodules("roifile")
+gui_hiddenimports = (
+    brkraw_hiddenimports
+    + roifile_hiddenimports
+    + [
+        "projet_master.model_inference",
+        "cv2",
+        "pandas",
+    ]
+)
 training_only_excludes = [
     "matplotlib",
     "networks",
