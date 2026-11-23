@@ -24,6 +24,7 @@ dependencies = [
     "torchvision==0.26.0+cu128; sys_platform == 'linux' or sys_platform == 'win32'",
     "torch==2.11.0; sys_platform == 'darwin'",
     "torchvision==0.26.0; sys_platform == 'darwin'",
+    "pandas>=3.1.1",
 ]
 
 [project.scripts]
