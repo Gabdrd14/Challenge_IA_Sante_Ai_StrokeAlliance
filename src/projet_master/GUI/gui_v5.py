@@ -4,6 +4,7 @@ import pathlib
 import sys
 import logging
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 import cv2
@@ -381,6 +382,7 @@ def convert_pvdataset_to_npy(file_path: str, scan_id) -> np.ndarray:
 def save_prediction_rois(
     prediction_masks: np.ndarray,
     output_path: pathlib.Path,
+    allow_empty: bool = False,
 ) -> pathlib.Path:
     """Enregistre les contours prédits comme ROI ImageJ dans un ZIP choisi."""
     masks = np.asarray(prediction_masks)
@@ -428,11 +430,95 @@ def save_prediction_rois(
         rois.append(roi)
 
     if not rois:
+        if allow_empty:
+            output_path = pathlib.Path(output_path)
+            if output_path.suffix.lower() != ".zip":
+                output_path = output_path.with_suffix(".zip")
+            with zipfile.ZipFile(output_path, "w"):
+                pass
+            return output_path
         raise ValueError("Aucun contour prédit à exporter en ROI.")
     output_path = pathlib.Path(output_path)
     if output_path.suffix.lower() != ".zip":
         output_path = output_path.with_suffix(".zip")
+    output_path.unlink(missing_ok=True)
     roiwrite(output_path, rois)
+    return output_path
+
+
+def save_modified_roi_slice(
+    prediction_masks: np.ndarray,
+    output_path: pathlib.Path,
+    slice_index: int,
+) -> pathlib.Path:
+    """Remplace uniquement une coupe dans un ZIP ROI existant."""
+    output_path = pathlib.Path(output_path)
+    if output_path.suffix.lower() != ".zip":
+        output_path = output_path.with_suffix(".zip")
+
+    existing_rois = roiread(str(output_path)) if output_path.is_file() else []
+    retained_rois = []
+    for roi in existing_rois:
+        try:
+            roi_slice = int(getattr(roi, "position", 0) or 0)
+        except (TypeError, ValueError):
+            roi_slice = 0
+        if roi_slice <= 0:
+            name = str(getattr(roi, "name", ""))
+            digits = "".join(character for character in name if character.isdigit())
+            roi_slice = int(digits) if digits else 0
+        if roi_slice != slice_index + 1:
+            retained_rois.append(roi)
+    existing_rois = retained_rois
+
+    model_masks = np.transpose(np.asarray(prediction_masks), (2, 1, 0))
+    if not 0 <= slice_index < model_masks.shape[0]:
+        raise ValueError(f"Index de coupe invalide : {slice_index + 1}.")
+
+    binary_mask = np.asarray(model_masks[slice_index] > 0, dtype=np.uint8)
+    contours, _ = cv2.findContours(
+        binary_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_NONE,
+    )
+    valid_contours = [
+        contour[:, 0, :].astype(np.float32)
+        for contour in contours
+        if contour.shape[0] >= 3
+    ]
+
+    if valid_contours:
+        all_points = np.concatenate(valid_contours)
+        path_commands = []
+        for points in valid_contours:
+            contour_commands = [0.0, *points[0]]
+            for point in points[1:]:
+                contour_commands.extend([1.0, *point])
+            contour_commands.append(4.0)
+            path_commands.extend(contour_commands)
+        existing_rois.append(
+            ImagejRoi(
+                roitype=ROI_TYPE.RECT,
+                name=f"{slice_index + 1:03d}",
+                position=slice_index + 1,
+                left=int(np.floor(all_points[:, 0].min())),
+                top=int(np.floor(all_points[:, 1].min())),
+                right=int(np.ceil(all_points[:, 0].max())) + 1,
+                bottom=int(np.ceil(all_points[:, 1].max())) + 1,
+                shape_roi_size=len(path_commands),
+                multi_coordinates=np.asarray(path_commands, dtype=np.float32),
+            )
+        )
+
+    existing_rois.sort(
+        key=lambda roi: int(getattr(roi, "position", 0) or 0)
+    )
+    if existing_rois:
+        output_path.unlink(missing_ok=True)
+        roiwrite(output_path, existing_rois)
+    else:
+        with zipfile.ZipFile(output_path, "w"):
+            pass
     return output_path
 
 
@@ -2668,6 +2754,8 @@ class MRIViewer(QWidget):
         if self.contour_edit_active:
             self.set_contour_edit_mode(False)
         self._finish_contour_point_edit()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
         self._clear_selected_contour()
         self._control_points_by_slice.clear()
         self.prediction_masks = None
@@ -2736,6 +2824,8 @@ class MRIViewer(QWidget):
         if self.contour_edit_active:
             self.set_contour_edit_mode(False)
         self._finish_contour_point_edit()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
         self._clear_selected_contour()
         self._cache_current_prediction()
         self.file_index = new_index
@@ -3027,6 +3117,28 @@ class MRIViewer(QWidget):
             QMessageBox.critical(self, "Erreur d'analyse", f"Prédiction impossible:\n{exc}")
         finally:
             self.analyze_button.setEnabled(True)
+
+    def _auto_save_roi_modifications(self) -> None:
+        """Réécrit le ZIP ROI correspondant après chaque modification du masque."""
+        if not self.roi_only or self.roi_zip_path is None or self.prediction_masks is None:
+            return
+        try:
+            save_modified_roi_slice(
+                self.prediction_masks,
+                self.roi_zip_path,
+                self.slice_slider.value(),
+            )
+        except Exception as exc:
+            LOGGER.error(
+                "Impossible de réécrire le ZIP ROI %s: %s",
+                self.roi_zip_path,
+                exc,
+            )
+            QMessageBox.critical(
+                self,
+                "Erreur de sauvegarde",
+                f"Impossible de réécrire le fichier ROI existant :\n{exc}",
+            )
 
     def set_mask_edit_mode(self, mode: str | None):
         """Définit le mode de dessin libre actif pour le masque courant."""
@@ -3524,6 +3636,8 @@ class MRIViewer(QWidget):
         self.update_history_buttons()
         self._refresh_result_list()
         self._cache_current_prediction()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
         if (
             self.contour_edit_active
             and self._active_contour_slice == slice_index
@@ -3712,6 +3826,8 @@ class MRIViewer(QWidget):
         self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
         self._cache_current_prediction()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
 
     def redo_mask_edit(self):
         self._finish_contour_point_edit()
@@ -3729,6 +3845,8 @@ class MRIViewer(QWidget):
         self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
         self._cache_current_prediction()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
 
     def reset_mask_edits(self):
         """Restaure uniquement la coupe courante à la prédiction originale."""
@@ -3762,6 +3880,8 @@ class MRIViewer(QWidget):
         self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
         self._cache_current_prediction()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
 
     def apply_mask_edit_path(self, path: QPainterPath, closes_path: bool):
         """Efface un trait ou ajoute une zone sur la coupe affichée."""
@@ -4009,6 +4129,8 @@ class MRIViewer(QWidget):
         self._refresh_result_list()
         self.show_slice(self.slice_slider.value())
         self._cache_current_prediction()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
 
     def save_prediction_as_rois(self):
         """Exporte la prédiction courante vers un ZIP choisi par l'utilisateur."""
@@ -4023,11 +4145,17 @@ class MRIViewer(QWidget):
 
         try:
             if self.roi_only:
-                model_masks = np.transpose(self.prediction_masks, (2, 1, 0))
-                output_path = save_prediction_rois(
-                    model_masks,
-                    self.roi_zip_path,
-                )
+                for slice_index in range(self.prediction_masks.shape[2]):
+                    if not np.array_equal(
+                        self.prediction_masks[:, :, slice_index],
+                        self.original_prediction_masks[:, :, slice_index],
+                    ):
+                        save_modified_roi_slice(
+                            self.prediction_masks,
+                            self.roi_zip_path,
+                            slice_index,
+                        )
+                output_path = self.roi_zip_path
                 QMessageBox.information(
                     self,
                     "ROI sauvegardées",
@@ -4144,6 +4272,8 @@ class MRIViewer(QWidget):
             self.set_contour_edit_mode(False)
         else:
             self._finish_contour_point_edit()
+        if self.roi_only:
+            self._auto_save_roi_modifications()
         super().closeEvent(event)
         
 
