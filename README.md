@@ -4,7 +4,7 @@ Build `gui_v5` with the project spec so Bruker's `brkraw` YAML resources are
 included in the executable:
 
 ```powershell
-uv run pyinstaller --clean --noconfirm guiv2.spec
+uv run pyinstaller --clean --noconfirm gui_v5.spec
 ```
 
 Running PyInstaller directly on `gui_v5.py` omits `brkraw/apps/loader/info/*.yaml`
