@@ -31,7 +31,7 @@ training_only_excludes = [
 
 
 a = Analysis(
-    [str(gui_directory / "gui_v4.py")],
+    [str(gui_directory / "gui_v5.py")],
     pathex=[str(project_root / "src")],
     datas=brkraw_datas
     + [
