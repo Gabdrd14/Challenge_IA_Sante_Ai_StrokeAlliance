@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 import cv2
 import numpy as np
 import brkraw
-from roifile import ImagejRoi, ROI_TYPE, roiwrite
+from roifile import ImagejRoi, ROI_TYPE, roiwrite, roiread
 import pandas as pd
 from PySide6.QtCore import QDateTime, QEvent, QPoint, QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import (
@@ -1553,6 +1553,7 @@ class MainWindow(QWidget):
         layout.addWidget(self.open_button)
         
         self.open_button_2 = QPushButton("Ouvrir le dataset sélectionné + ROI")
+        self.open_button_2.clicked.connect(self.open_selected_file_with_roi)
         layout.addWidget(self.open_button_2)
 
         self.status_label = QLabel(
@@ -1970,7 +1971,91 @@ class MainWindow(QWidget):
     def open_selected_file_and_roi(self, item):
         row = self.warning_file_list.row(item)
         file = self.warning_files[row]
-        # open viewer with roi
+        self.open_selected_file_with_roi(file)
+
+    def _resolve_roi_zip(
+        self,
+        file_path: str | pathlib.Path,
+        roi_directory: pathlib.Path,
+    ) -> pathlib.Path | None:
+        """Associe un PvDataset à son ZIP ROI dans le dossier choisi."""
+        dataset_name = pathlib.Path(file_path).name
+        dataset_stem = pathlib.Path(dataset_name).stem
+        candidates = (
+            roi_directory / f"{dataset_stem}.zip",
+            roi_directory / f"{dataset_name}.zip",
+            roi_directory / dataset_name,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+
+        for zip_path in sorted(
+            roi_directory.rglob("*.zip"),
+            key=lambda path: path.name.casefold(),
+        ):
+            if zip_path.stem.casefold() == dataset_stem.casefold():
+                return zip_path
+        return None
+
+    def open_selected_file_with_roi(self, file_path: str | pathlib.Path | None = None):
+        """Ouvre le dataset sélectionné avec son fichier ROI déjà prédit."""
+        # QPushButton.clicked emits a bool; for the button, ignore it and use
+        # the currently selected row.
+        if isinstance(file_path, bool):
+            file_path = None
+        if file_path is None:
+            row = self.file_list.currentRow()
+            if row < 0 or row >= len(self.dataset_paths):
+                QMessageBox.information(
+                    self,
+                    "No selection",
+                    "Please select a dataset first.",
+                )
+                return
+            file_path = self.dataset_paths[row]
+
+        roi_directory = QFileDialog.getExistingDirectory(
+            self,
+            "Choisir le dossier contenant les ROI prédites",
+            str(self.rois_saving_dir_path or os.getcwd()),
+        )
+        if not roi_directory:
+            return
+        roi_directory = pathlib.Path(roi_directory)
+        roi_zip_path = self._resolve_roi_zip(file_path, roi_directory)
+        if roi_zip_path is None:
+            QMessageBox.warning(
+                self,
+                "ROI introuvables",
+                "Aucun fichier ZIP ROI correspondant n'a été trouvé pour le dataset sélectionné.",
+            )
+            return
+
+        try:
+            model_directory = saved_model_directory() or PROJECT_ROOT
+
+            viewer = MRIViewer(
+                file_path,
+                model_directory,
+                self.dataset_paths,
+                roi_zip_path=roi_zip_path,
+                roi_directory=roi_directory,
+            )
+            self.viewers.append(viewer)
+            viewer.destroyed.connect(
+                lambda obj=None, window=viewer:
+                    self._remove_viewer(window)
+            )
+            viewer.show()
+            viewer.raise_()
+            viewer.activateWindow()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Erreur d'ouverture",
+                f"Impossible d'ouvrir le dataset avec ses ROI :\n{exc}",
+            )
 
     def open_selected_file(self):
         """Ouvre le dataset sélectionné dans une fenêtre séparée."""
@@ -2053,11 +2138,16 @@ class MRIViewer(QWidget):
         file_path: str,
         model_directory: pathlib.Path,
         dataset_paths: list[str] | None = None,
+        roi_zip_path: pathlib.Path | None = None,
+        roi_directory: pathlib.Path | None = None,
     ):
         super().__init__()
 
         self.file_path = file_path
         self.model_directory = model_directory
+        self.roi_zip_path = roi_zip_path
+        self.roi_directory = roi_directory
+        self.roi_only = roi_zip_path is not None
         self.dataset_paths = dataset_paths or [file_path]
         self.file_index = next(
             (
@@ -2140,8 +2230,12 @@ class MRIViewer(QWidget):
         )
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         data_layout.addWidget(self.model_combo)
+        if self.roi_only:
+            self.model_combo.hide()
 
-        prediction_group = QGroupBox("Prédiction et export")
+        prediction_group = QGroupBox(
+            "ROI existantes" if self.roi_only else "Prédiction et export"
+        )
         prediction_layout = QHBoxLayout(prediction_group)
         prediction_layout.setContentsMargins(6, 4, 6, 4)
         prediction_layout.setSpacing(4)
@@ -2170,12 +2264,18 @@ class MRIViewer(QWidget):
         )
         self.analyze_button.clicked.connect(self.analyze_volume)
         prediction_layout.addWidget(self.analyze_button)
+        if self.roi_only:
+            self.analyze_button.hide()
 
         self.save_roi_button = QPushButton("Sauvegarder les ROI")
+        if self.roi_only:
+            self.save_roi_button.setText("Sauvegarder les modifications ROI")
+            self.save_roi_button.setFixedWidth(260)
+        else:
+            self.save_roi_button.setFixedWidth(150)
         self.save_roi_button.setToolTip(
             "Exporter les contours prédits dans un fichier ROI ZIP"
         )
-        self.save_roi_button.setFixedWidth(150)
         self.save_roi_button.setFixedHeight(30)
         self.save_roi_button.setEnabled(False)
         self.save_roi_button.clicked.connect(self.save_prediction_as_rois)
@@ -2649,6 +2749,33 @@ class MRIViewer(QWidget):
             len(self.dataset_paths),
             self.file_path,
         )
+        if self.roi_only and self.roi_directory is not None:
+            dataset_name = pathlib.Path(self.file_path).name
+            dataset_stem = pathlib.Path(dataset_name).stem
+            candidates = (
+                self.roi_directory / f"{dataset_stem}.zip",
+                self.roi_directory / f"{dataset_name}.zip",
+            )
+            self.roi_zip_path = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.is_file()
+                ),
+                None,
+            )
+            if self.roi_zip_path is None:
+                self.roi_zip_path = next(
+                    (
+                        zip_path
+                        for zip_path in sorted(
+                            self.roi_directory.rglob("*.zip"),
+                            key=lambda path: path.name.casefold(),
+                        )
+                        if zip_path.stem.casefold() == dataset_stem.casefold()
+                    ),
+                    None,
+                )
         self._update_file_navigation()
         self.load_file()
 
@@ -2671,6 +2798,10 @@ class MRIViewer(QWidget):
 
     def load_models(self):
         """Remplit le sélecteur avec les checkpoints du dossier configuré."""
+        if self.roi_only:
+            self.model_combo.clear()
+            self.model_combo.hide()
+            return
         try:
             self.model_paths = available_checkpoints(self.model_directory)
         except FileNotFoundError as exc:
@@ -2704,6 +2835,72 @@ class MRIViewer(QWidget):
                 checkpoint,
             )
         self.model_combo.setCurrentIndex(0)
+
+    def _load_roi_masks(self) -> None:
+        """Charge les contours d'un ZIP ROI dans les masques éditables du viewer."""
+        if self.volume is None or self.roi_zip_path is None:
+            self._clear_current_prediction()
+            QMessageBox.warning(
+                self,
+                "ROI introuvables",
+                f"Aucun fichier ROI correspondant trouvé pour :\n"
+                f"{os.path.basename(self.file_path)}",
+            )
+            return
+
+        height, width, depth = self.volume.shape
+        masks = np.zeros((width, height, depth), dtype=np.uint8)
+
+        rois = roiread(str(self.roi_zip_path))
+        for roi in rois:
+            position = getattr(roi, "position", 0)
+            try:
+                position = int(position)
+            except (TypeError, ValueError):
+                position = 0
+            if position <= 0:
+                name = getattr(roi, "name", "")
+                name_number = "".join(
+                    character
+                    for character in str(name).split("-")[0]
+                    if character.isdigit()
+                )
+                if not name_number:
+                    continue
+                try:
+                    position = int(name_number)
+                except (TypeError, ValueError):
+                    continue
+
+            slice_index = position - 1
+            if not 0 <= slice_index < depth:
+                continue
+
+            coordinates = roi.coordinates()
+            if coordinates is None:
+                continue
+            points = np.asarray(coordinates, dtype=np.float32)
+            if points.ndim != 2 or points.shape[1] < 2 or len(points) < 3:
+                continue
+
+            displayed_mask = np.zeros((height, width), dtype=np.uint8)
+            polygon = np.rint(points[:, :2]).astype(np.int32)
+            cv2.fillPoly(displayed_mask, [polygon], 1)
+            masks[:, :, slice_index] = np.transpose(displayed_mask)
+
+        self.prediction_masks = masks
+        self.original_prediction_masks = masks.copy()
+        self.prediction_outline_masks = masks.copy()
+        self.erased_outline_masks = np.zeros_like(masks, dtype=bool)
+        self.current_prediction_key = None
+        self.reset_mask_history()
+        self.save_roi_button.setEnabled(True)
+        self.crop_mask_button.setEnabled(True)
+        self.add_mask_button.setEnabled(True)
+        self.edit_zone_button.setEnabled(True)
+        self._set_prediction_ready(True)
+        self._refresh_result_list()
+        self.show_slice(self.slice_slider.value())
 
     def load_file(self):
         """Charge le scan IRM sélectionné."""
@@ -2751,6 +2948,8 @@ class MRIViewer(QWidget):
             self.slice_slider.setValue(0)
             if not self._restore_prediction_cache(self.file_path, selected_scan_id):
                 self.show_slice(0)
+            if self.roi_only:
+                self._load_roi_masks()
             self._update_navigation_buttons()
 
         except Exception as exc:
@@ -2780,6 +2979,8 @@ class MRIViewer(QWidget):
             self.slice_slider.setValue(0)
             if not self._restore_prediction_cache(self.file_path, scan_id):
                 self.show_slice(0)
+            if self.roi_only:
+                self._load_roi_masks()
             self._update_navigation_buttons()
         except Exception as exc:
             QMessageBox.critical(self, "Analyse impossible", f"Impossible de charger cette analyse:\n{exc}")
@@ -3821,6 +4022,20 @@ class MRIViewer(QWidget):
             return
 
         try:
+            if self.roi_only:
+                model_masks = np.transpose(self.prediction_masks, (2, 1, 0))
+                output_path = save_prediction_rois(
+                    model_masks,
+                    self.roi_zip_path,
+                )
+                QMessageBox.information(
+                    self,
+                    "ROI sauvegardées",
+                    f"Les modifications ont été enregistrées dans :\n{output_path}",
+                )
+                self._cache_current_prediction()
+                return
+
             suggested_name = pathlib.Path(self.file_path).with_suffix(".zip").name
             selected_path, _ = QFileDialog.getSaveFileName(
                 self,
