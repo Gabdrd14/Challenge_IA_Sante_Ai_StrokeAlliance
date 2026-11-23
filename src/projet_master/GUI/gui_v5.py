@@ -1751,6 +1751,7 @@ class MainWindow(QWidget):
         dialog = QDialog(self)
         dialog.setWindowTitle("Analyse de l'étude")
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setMinimumSize(520, 180)
         layout = QVBoxLayout()
         dialog.setLayout(layout)
         label = QLabel("Voulez-vous analyser l'étude entière ?")
@@ -1860,8 +1861,9 @@ class MainWindow(QWidget):
         progress_label.setWordWrap(True)
         progress_layout.addWidget(progress_label)
         progress_bar = QProgressBar(progress)
-        progress_bar.setRange(0, len(self.dataset_paths) * 2)
+        progress_bar.setRange(0, len(self.dataset_paths))
         progress_bar.setValue(0)
+        progress_bar.setFormat("%v / %m fichiers")
         progress_layout.addWidget(progress_bar)
         error_count_label = QLabel("Erreurs : 0")
         progress_layout.addWidget(error_count_label)
@@ -1869,8 +1871,12 @@ class MainWindow(QWidget):
         progress_layout.addWidget(empty_prediction_label)
         roi_count_label = QLabel("ROI générés : 0")
         progress_layout.addWidget(roi_count_label)
-        progress.resize(420, 120)
-        progress.show()
+        progress.setMinimumSize(520, 220)
+        progress.resize(520, 220)
+        progress.open()
+        progress.raise_()
+        progress.activateWindow()
+        QApplication.processEvents()
 
         def update_error_count() -> None:
             error_count_label.setText(f"Erreurs : {len(prediction_errors)}")
@@ -1908,6 +1914,7 @@ class MainWindow(QWidget):
                     )
                     progress_bar.setValue(progress_bar.value() + 1)
                     update_error_count()
+                    QApplication.processEvents()
                     continue
 
                 try:
