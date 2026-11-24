@@ -298,8 +298,31 @@ def default_scan_index(all_scans: dict) -> int:
     return 0
 
 
-def model_scan_index(all_scans: dict, model_path: pathlib.Path | None) -> int:
+def model_scan_index(
+    all_scans: dict,
+    model_path: pathlib.Path | None,
+    model_species: str | None = None,
+) -> int:
     """Sélectionne le canal IRM correspondant au modèle choisi."""
+    if model_species == "rat":
+        expected = ("t2turborare",)
+        for index, (_, scan_info) in enumerate(all_scans.items()):
+            protocol = unicodedata.normalize(
+                "NFKD",
+                str(scan_info.get("Protocol", ""))
+                .casefold()
+                .replace("*", "star"),
+            )
+            protocol = "".join(
+                character
+                for character in protocol
+                if character.isalnum()
+                and not unicodedata.combining(character)
+            )
+            if "t2turborare" in protocol:
+                return index
+        return default_scan_index(all_scans)
+
     if model_path is None:
         return default_scan_index(all_scans)
 
@@ -331,9 +354,13 @@ def model_scan_index(all_scans: dict, model_path: pathlib.Path | None) -> int:
     return default_scan_index(all_scans)
 
 
-def model_scan_id(all_scans: dict, model_path: pathlib.Path | None):
+def model_scan_id(
+    all_scans: dict,
+    model_path: pathlib.Path | None,
+    model_species: str | None = None,
+):
     """Retourne l'identifiant Bruker du scan choisi pour un modèle."""
-    scan_index = model_scan_index(all_scans, model_path)
+    scan_index = model_scan_index(all_scans, model_path, model_species)
     scan_ids = list(all_scans)
     if 0 <= scan_index < len(scan_ids):
         return scan_ids[scan_index]
@@ -1612,6 +1639,7 @@ class MainWindow(QWidget):
         self.model_directory_button = QPushButton("Spécifier le dossier des modèles")
         self.model_directory_button.clicked.connect(self.choose_model_directory)
         layout.addWidget(self.model_directory_button)
+
         self.model_warning_label = QLabel()
         self.model_warning_label.setWordWrap(True)
         self.model_warning_label.setStyleSheet(
@@ -1988,6 +2016,7 @@ class MainWindow(QWidget):
                     scan_id = model_scan_id(
                         all_scans,
                         self.model_checkpoint,
+                        getattr(self, "model_species", "souris"),
                     )
                     model_volume = convert_pvdataset_to_npy(file_path, scan_id)
                     model_mask = self.predictor.predict(
@@ -2126,6 +2155,7 @@ class MainWindow(QWidget):
                 self.dataset_paths,
                 roi_zip_path=roi_zip_path,
                 roi_directory=roi_directory,
+                model_species=getattr(self, "model_species", "souris"),
             )
             self.viewers.append(viewer)
             viewer.destroyed.connect(
@@ -2164,7 +2194,12 @@ class MainWindow(QWidget):
                     return
 
             # Sans parent : il s'agit d'une fenêtre principale indépendante.
-            viewer = MRIViewer(file_path, model_directory, self.dataset_paths)
+            viewer = MRIViewer(
+                file_path,
+                model_directory,
+                self.dataset_paths,
+                model_species=getattr(self, "model_species", "souris"),
+            )
             self.viewers.append(viewer)
 
             # Supprime la référence lorsque la fenêtre est détruite.
@@ -2225,6 +2260,7 @@ class MRIViewer(QWidget):
         dataset_paths: list[str] | None = None,
         roi_zip_path: pathlib.Path | None = None,
         roi_directory: pathlib.Path | None = None,
+        model_species: str = "souris",
     ):
         super().__init__()
 
@@ -2233,6 +2269,7 @@ class MRIViewer(QWidget):
         self.roi_zip_path = roi_zip_path
         self.roi_directory = roi_directory
         self.roi_only = roi_zip_path is not None
+        self.model_species = model_species
         self.dataset_paths = dataset_paths or [file_path]
         self.file_index = next(
             (
@@ -2299,6 +2336,31 @@ class MRIViewer(QWidget):
         data_layout = QHBoxLayout(data_group)
         data_layout.setContentsMargins(6, 4, 6, 4)
         data_layout.setSpacing(4)
+
+        species_label = QLabel("Type :")
+        data_layout.addWidget(species_label)
+        self.souris_button = QPushButton("Souris")
+        self.rat_button = QPushButton("Rat")
+        self.souris_button.setCheckable(True)
+        self.rat_button.setCheckable(True)
+        self.souris_button.setFixedWidth(70)
+        self.rat_button.setFixedWidth(70)
+        self.souris_button.setChecked(self.model_species == "souris")
+        self.rat_button.setChecked(self.model_species == "rat")
+
+        def select_species(species: str) -> None:
+            if species == self.model_species:
+                return
+            self.model_species = species
+            self.souris_button.setChecked(species == "souris")
+            self.rat_button.setChecked(species == "rat")
+            self._on_species_changed()
+
+        self.souris_button.clicked.connect(lambda: select_species("souris"))
+        self.rat_button.clicked.connect(lambda: select_species("rat"))
+        data_layout.addWidget(self.souris_button)
+        data_layout.addWidget(self.rat_button)
+
         self.analysis_combo = QComboBox()
         self.analysis_combo.setToolTip("Choisir le type d'analyse présent dans le PvDataset")
         self.analysis_combo.setFixedWidth(210)
@@ -2871,8 +2933,10 @@ class MRIViewer(QWidget):
     def _selected_voxel_constants(self):
         model_path = self.model_combo.currentData()
         model_name = str(model_path) if model_path is not None else ""
-        #print(model_name)
-        if "RAT" in model_name:
+        if (
+            getattr(self, "model_species", "souris") == "rat"
+            or "rat" in pathlib.Path(model_name).stem.casefold()
+        ):
             return VOXEL_AREA_MM2_RAT, VOXEL_VOLUME_MM3_RAT
         return VOXEL_AREA_MM2, VOXEL_VOLUME_MM3
 
@@ -2880,9 +2944,26 @@ class MRIViewer(QWidget):
         if not self.all_scans:
             return
         model_path = self.model_combo.currentData()
-        scan_index = model_scan_index(self.all_scans, model_path)
+        scan_index = model_scan_index(
+            self.all_scans,
+            model_path,
+            getattr(self, "model_species", "souris"),
+        )
         if scan_index != self.analysis_combo.currentIndex():
             self.analysis_combo.setCurrentIndex(scan_index)
+        self._refresh_result_list()
+
+    def _on_species_changed(self) -> None:
+        """Met à jour les constantes voxel et le canal IRM par défaut."""
+        if self.all_scans:
+            model_path = self.model_combo.currentData()
+            scan_index = model_scan_index(
+                self.all_scans,
+                model_path,
+                self.model_species,
+            )
+            if scan_index != self.analysis_combo.currentIndex():
+                self.analysis_combo.setCurrentIndex(scan_index)
         self._refresh_result_list()
 
     def load_models(self):
@@ -3015,6 +3096,7 @@ class MRIViewer(QWidget):
                         model_scan_index(
                             all_scans,
                             self.model_combo.currentData(),
+                            getattr(self, "model_species", "souris"),
                         )
                     )
             finally:
