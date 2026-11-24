@@ -405,6 +405,16 @@ def convert_pvdataset_to_npy(file_path: str, scan_id) -> np.ndarray:
 
     return model_volume.astype(np.float32, copy=False)
 
+def postprocess_mask(mask: np.ndarray) -> np.ndarray:
+    for mask_slice in mask:
+        if np.sum(mask_slice) == 0:
+            continue
+        num_regions, labelled_img, stats, _ = cv2.connectedComponentsWithStats(mask_slice)
+        for label in range(1, num_regions):
+            area = stats[label, cv2.CC_STAT_AREA]
+            if area <= 3:
+                mask_slice[labelled_img == label] = 0
+    return mask
 
 def save_prediction_rois(
     prediction_masks: np.ndarray,
@@ -2115,6 +2125,7 @@ class MainWindow(QWidget):
                         scan_id,
                         self.model_checkpoint,
                     )
+                    model_mask = postprocess_mask(model_mask)
                     self.study_prediction_masks[
                         str(pathlib.Path(file_path).resolve())
                     ] = model_mask.copy()
