@@ -1912,28 +1912,27 @@ class MainWindow(QWidget):
         if not self.rois_saving_dir_path:
             QMessageBox.warning(self, "Dossier non sélectionné", "Choisissez un dossier pour enregistrer les ROI avant de lancer l'analyse")
             return
-        if self.model_checkpoint is None:
-            model_directory = saved_model_directory()
+        model_directory = saved_model_directory()
+        if model_directory is None:
+            model_directory = self.choose_model_directory()
             if model_directory is None:
-                model_directory = self.choose_model_directory()
-                if model_directory is None:
-                    return
-            selected_model = self.choose_study_model(model_directory)
-            if selected_model is None:
-                QMessageBox.information(
-                    self,
-                    "Modèle non sélectionné",
-                    "Aucune analyse n'a été lancée.",
-                )
                 return
-            self.model_checkpoint = selected_model
-            if not self.model_checkpoint.is_file():
-                QMessageBox.warning(
-                    self,
-                    "Modèle introuvable",
-                    "Le fichier sélectionné n'existe pas.",
-                )
-                return
+        selected_model = self.choose_study_model(model_directory)
+        if selected_model is None:
+            QMessageBox.information(
+                self,
+                "Modèle non sélectionné",
+                "Aucune analyse n'a été lancée.",
+            )
+            return
+        self.model_checkpoint = selected_model
+        if not self.model_checkpoint.is_file():
+            QMessageBox.warning(
+                self,
+                "Modèle introuvable",
+                "Le fichier sélectionné n'existe pas.",
+            )
+            return
         
         prediction_errors: list[tuple[str, str]] = []
         empty_predictions: list[tuple[str, str]] = []
