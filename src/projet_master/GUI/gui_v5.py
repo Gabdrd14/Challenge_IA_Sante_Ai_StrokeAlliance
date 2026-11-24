@@ -706,6 +706,17 @@ class SlicePredictor:
         return (probabilities >= PREDICTION_THRESHOLD).astype(np.uint8)
 
 
+def predict_pvdataset_volume(
+    predictor: "SlicePredictor",
+    file_path: str,
+    scan_id,
+    checkpoint: pathlib.Path,
+) -> np.ndarray:
+    """Exécute exactement le même pipeline pour le viewer et l'étude entière."""
+    model_volume = convert_pvdataset_to_npy(file_path, scan_id)
+    return predictor.predict(model_volume, checkpoint)
+
+
 def prepare_volume(data: np.ndarray) -> np.ndarray:
     """Prépare un tableau 3D pour la navigation entre les coupes."""
     data = np.squeeze(data)
@@ -1629,6 +1640,9 @@ class MainWindow(QWidget):
         self.dataset_paths = []
         self.rois_saving_dir_path = None
         self.model_checkpoint = None
+        self.study_scan_protocol = None
+        self.study_scan_id = None
+        self.study_prediction_masks: dict[str, np.ndarray] = {}
 
         layout = QVBoxLayout(self)
 
@@ -1828,6 +1842,64 @@ class MainWindow(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             return selected_model[0]
         return None
+
+    def choose_study_scan(self) -> tuple[object, str] | None:
+        """Ouvre une fenêtre listant les canaux du premier dataset de l'étude."""
+        if not self.dataset_paths:
+            return None
+
+        _, _, all_scans = load_data(self.dataset_paths[0])
+        if not all_scans:
+            QMessageBox.warning(
+                self,
+                "Aucun canal",
+                "Le premier PvDataset ne contient aucun canal analysable.",
+            )
+            return None
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choisir le channel pour l'étude")
+        dialog.setMinimumSize(520, 360)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Canaux disponibles dans le premier dataset"))
+
+        scan_list = QListWidget()
+        for scan_id, scan_info in all_scans.items():
+            item = QListWidgetItem(
+                scan_label(scan_id, scan_info)
+            )
+            item.setData(Qt.ItemDataRole.UserRole, scan_id)
+            scan_list.addItem(item)
+        layout.addWidget(scan_list)
+
+        selected: list[tuple[object, str] | None] = [None]
+        buttons = QHBoxLayout()
+        cancel_button = QPushButton("Annuler")
+        validate_button = QPushButton("Utiliser ce channel")
+
+        def validate_selection() -> None:
+            item = scan_list.currentItem()
+            if item is None:
+                return
+            scan_id = item.data(Qt.ItemDataRole.UserRole)
+            protocol = str(all_scans[scan_id].get("Protocol", ""))
+            selected[0] = (scan_id, protocol)
+            dialog.accept()
+
+        cancel_button.clicked.connect(dialog.reject)
+        validate_button.clicked.connect(validate_selection)
+        scan_list.itemDoubleClicked.connect(
+            lambda _item: validate_selection()
+        )
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(validate_button)
+        layout.addLayout(buttons)
+
+        if scan_list.count():
+            scan_list.setCurrentRow(0)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return selected[0]
+        return None
     
     
 
@@ -1961,6 +2033,17 @@ class MainWindow(QWidget):
                 "Le fichier sélectionné n'existe pas.",
             )
             return
+
+        selected_scan = self.choose_study_scan()
+        if selected_scan is None:
+            QMessageBox.information(
+                self,
+                "Channel non sélectionné",
+                "Aucune analyse n'a été lancée.",
+            )
+            return
+        self.study_scan_protocol = selected_scan[1]
+        self.study_scan_id = selected_scan[0]
         
         prediction_errors: list[tuple[str, str]] = []
         empty_predictions: list[tuple[str, str]] = []
@@ -2013,16 +2096,28 @@ class MainWindow(QWidget):
 
                 try:
                     _, _, all_scans = load_data(file_path)
-                    scan_id = model_scan_id(
-                        all_scans,
-                        self.model_checkpoint,
-                        getattr(self, "model_species", "souris"),
+                    scan_id = next(
+                        (
+                            scan_id
+                            for scan_id, scan_info in all_scans.items()
+                            if str(scan_info.get("Protocol", ""))
+                            == self.study_scan_protocol
+                        ),
+                        None,
                     )
-                    model_volume = convert_pvdataset_to_npy(file_path, scan_id)
-                    model_mask = self.predictor.predict(
-                        model_volume,
+                    if scan_id is None:
+                        raise ValueError(
+                            f"Channel introuvable: {self.study_scan_protocol}"
+                        )
+                    model_mask = predict_pvdataset_volume(
+                        self.predictor,
+                        file_path,
+                        scan_id,
                         self.model_checkpoint,
                     )
+                    self.study_prediction_masks[
+                        str(pathlib.Path(file_path).resolve())
+                    ] = model_mask.copy()
                 except Exception as exc:
                     prediction_errors.append(
                         (file_path, f"Erreur de chargement ou de prédiction: {exc}")
@@ -2156,6 +2251,7 @@ class MainWindow(QWidget):
                 roi_zip_path=roi_zip_path,
                 roi_directory=roi_directory,
                 model_species=getattr(self, "model_species", "souris"),
+                study_prediction_masks=self.study_prediction_masks,
             )
             self.viewers.append(viewer)
             viewer.destroyed.connect(
@@ -2261,6 +2357,7 @@ class MRIViewer(QWidget):
         roi_zip_path: pathlib.Path | None = None,
         roi_directory: pathlib.Path | None = None,
         model_species: str = "souris",
+        study_prediction_masks: dict[str, np.ndarray] | None = None,
     ):
         super().__init__()
 
@@ -2270,6 +2367,7 @@ class MRIViewer(QWidget):
         self.roi_directory = roi_directory
         self.roi_only = roi_zip_path is not None
         self.model_species = model_species
+        self.study_prediction_masks = study_prediction_masks or {}
         self.dataset_paths = dataset_paths or [file_path]
         self.file_index = next(
             (
@@ -3018,6 +3116,41 @@ class MRIViewer(QWidget):
             )
             return
 
+        study_prediction_mask = self.study_prediction_masks.get(
+            str(pathlib.Path(self.file_path).resolve())
+        )
+        if study_prediction_mask is not None:
+            model_masks = np.asarray(
+                study_prediction_mask,
+                dtype=np.uint8,
+            )
+            if model_masks.ndim == 3:
+                masks = np.transpose(model_masks, (2, 1, 0))
+                if masks.shape == (self.volume.shape[1], self.volume.shape[0], self.volume.shape[2]):
+                    self.prediction_masks = masks
+                    self.original_prediction_masks = masks.copy()
+                    self.prediction_outline_masks = masks.copy()
+                    self.erased_outline_masks = np.zeros_like(
+                        masks,
+                        dtype=bool,
+                    )
+                    self.current_prediction_key = None
+                    self.reset_mask_history()
+                    self.original_prediction_masks = masks.copy()
+                    self.prediction_outline_masks = masks.copy()
+                    self.erased_outline_masks = np.zeros_like(
+                        masks,
+                        dtype=bool,
+                    )
+                    self.save_roi_button.setEnabled(True)
+                    self.crop_mask_button.setEnabled(True)
+                    self.add_mask_button.setEnabled(True)
+                    self.edit_zone_button.setEnabled(True)
+                    self._set_prediction_ready(True)
+                    self._refresh_result_list()
+                    self.show_slice(self.slice_slider.value())
+                    return
+
         height, width, depth = self.volume.shape
         masks = np.zeros((width, height, depth), dtype=np.uint8)
 
@@ -3117,10 +3250,10 @@ class MRIViewer(QWidget):
             # Commence à la première coupe afin que le curseur et les flèches
             # aient une origine claire.
             self.slice_slider.setValue(0)
-            if not self._restore_prediction_cache(self.file_path, selected_scan_id):
-                self.show_slice(0)
             if self.roi_only:
                 self._load_roi_masks()
+            elif not self._restore_prediction_cache(self.file_path, selected_scan_id):
+                self.show_slice(0)
             self._update_navigation_buttons()
 
         except Exception as exc:
@@ -3148,10 +3281,10 @@ class MRIViewer(QWidget):
             self.volume = prepare_volume(data)
             self.slice_slider.setRange(0, self.volume.shape[2] - 1)
             self.slice_slider.setValue(0)
-            if not self._restore_prediction_cache(self.file_path, scan_id):
-                self.show_slice(0)
             if self.roi_only:
                 self._load_roi_masks()
+            elif not self._restore_prediction_cache(self.file_path, scan_id):
+                self.show_slice(0)
             self._update_navigation_buttons()
         except Exception as exc:
             QMessageBox.critical(self, "Analyse impossible", f"Impossible de charger cette analyse:\n{exc}")
@@ -3170,11 +3303,15 @@ class MRIViewer(QWidget):
         QApplication.processEvents()
         try:
             scan_id = self.analysis_combo.currentData()
-            model_volume = convert_pvdataset_to_npy(self.file_path, scan_id)
             model_path = self.model_combo.currentData()
             if not isinstance(model_path, pathlib.Path):
                 raise ValueError("Aucun checkpoint de modèle sélectionné.")
-            model_mask = self.predictor.predict(model_volume, model_path)
+            model_mask = predict_pvdataset_volume(
+                self.predictor,
+                self.file_path,
+                scan_id,
+                model_path,
+            )
             # Conserve le volume original du viewer et reconvertit uniquement
             # le masque. Cette transposition inverse celle de loader.py ;
             # l'axe des coupes garde le même ordre, sans inversion.
