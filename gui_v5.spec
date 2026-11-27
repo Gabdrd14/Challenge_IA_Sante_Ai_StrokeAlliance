@@ -8,7 +8,8 @@ from PyInstaller.utils.hooks import (
 
 
 project_root = Path(SPECPATH)
-gui_directory = project_root / "src" / "projet_master" / "GUI"
+gui_directory = project_root / "src" / "projet_master" / "GUI_APP"
+asset_directory = gui_directory / "assets"
 inference_module = project_root / "src" / "projet_master" / "model_inference.py"
 brkraw_datas = collect_data_files("brkraw")
 brkraw_hiddenimports = collect_submodules("brkraw")
@@ -40,12 +41,11 @@ training_only_excludes = [
 
 
 a = Analysis(
-    [str(gui_directory / "gui_v5.py")],
+    [str(gui_directory / "app.py")],
     pathex=[str(project_root / "src")],
     datas=brkraw_datas
     + [
-        (str(gui_directory / "logo.png"), "."),
-        (str(gui_directory / "etaplablogo.png"), "."),
+        (str(asset_directory), "projet_master/GUI_APP/assets"),
         (str(inference_module), "projet_master"),
     ],
     hiddenimports=gui_hiddenimports,
@@ -63,7 +63,7 @@ exe = EXE(
     exclude_binaries=True,
     name="STR@KE ALLIANCE MRI VIEWER",
     console=False,
-    icon=str(gui_directory / "app_icon.ico"),
+    icon=str(asset_directory / "app_icon.ico"),
 )
 coll = COLLECT(
     exe,
